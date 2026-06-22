@@ -32,3 +32,5 @@ Every download operation runs in a dedicated worker thread to prevent blocking t
 -   **Declarative Config**: All weights and rules are centralized for easy tuning.
 -   **Heuristic Ranking**: Jaccard similarity + blacklist/whitelist scoring instead of fragile regex matching.
 -   **Threaded Dispatch**: Worker threads handle all I/O; the UI thread only reads from a progress queue.
+
+-   Install fmmpeg if needed here for windows: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-21-13-34/ffmpeg-N-125146-gc6bb22dea0-win64-gpl.zip
