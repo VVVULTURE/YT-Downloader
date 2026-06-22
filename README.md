@@ -1,82 +1,34 @@
-# YT Downloader
+# YT Downloader Architecture & Usage
 
-A simple Windows 11 desktop app to download music and YouTube videos.
+## How to Use this App
+The application provides two distinct paths for getting content from YouTube:
 
----
+1.  **Music Tab**: Designed for high-quality audio files. Enter the **Artist** and **Song Name**. If you want a 320kbps MP3, leave it on "MP3" (default); if you want to keep the video with the music track, select "MP4".
+2.  **Video Tab**: Designed for general media content. Enter the **YouTube Creator / Channel** and an approximate **Video Title**. Choose your preferred resolution from the quality selector below the title field.
 
-## Requirements
-
-- **Python 3.10+** — https://www.python.org/downloads/
-  (check "Add Python to PATH" during install)
-- **ffmpeg** — needed for MP3 conversion and best-quality video merging
-  (setup.bat tries to install it automatically via winget)
+Once both fields are filled, click **Download**. The app will automatically find the best match based on our internal scoring engine; when complete, a success message appears, and the destination folder opens instantly in Windows Explorer.
 
 ---
 
-## Setup (first time only)
+## Architecture Overview
+The system is divided into three distinct layers:
 
-Double-click **setup.bat**. It will:
-1. Install `customtkinter` and `yt-dlp` via pip
-2. Try to install ffmpeg via winget (Windows 11 built-in package manager)
+-   **Configuration Layer**: All constants are defined at the top — the output directory structure, scoring weights, and curated blacklist/whitelist for music determine how each mode behaves without cluttering the UI logic.
+-   **Scoring Engine**: Instead of fragile string matching (which breaks on variations like "artist feat artist"), this layer uses Jaccard similarity to rank results; it heavily penalizes live recordings so that only official studio releases are returned in Music mode.
+-   **GUI & Worker Layer**: Built with customtkinter, every network operation runs in a daemon thread; status updates flow through the progress queue rather than direct widget writes, keeping the UI responsive during long downloads.
 
-If winget fails, install ffmpeg manually:
-1. Download from https://www.gyan.dev/ffmpeg/builds/ → `ffmpeg-release-essentials.zip`
-2. Extract and place the `bin/` contents in `C:\ffmpeg\bin\`
-3. Add `C:\ffmpeg\bin` to your system PATH
+## System Deep Dive
 
----
+### Configuration & Defaults
+The system uses declarative configuration instead of hardcoded values inside the widgets. The `OUTPUT_BASE` defines where files go — split into `/Music` and `/Videos` directories for clarity. A JSON-based scoring config stores blacklist terms (e.g., "live", "acoustic") used by the engine to filter out undesirable results before they reach the user.
 
-## Running the app
+### Heuristic Ranking Engine
+Rather than simple substring matches, we use Jaccard similarity on word sets (`_sim`). This allows a query like "Lady Gaga Judas" to match titles containing extra words (e.g., "[OFFICIAL MUSIC VIDEO] JUDAS"). The scoring function applies penalties for blacklist terms and awards points for official markers; this ensures that the highest-ranking result is almost always the studio version, not a fan remake or live performance.
 
-Double-click **run.bat** (or `python downloader.py`).
+### Async Worker Dispatch
+Every download operation runs in a dedicated worker thread to prevent blocking the main loop — long network calls from `yt_dlp` would otherwise freeze the GUI. The grader sends status updates through `progress_queue`; the main loop polls that queue with `.after(100)` and applies those messages directly to the UI widget, ensuring only one thread ever modifies a tkinter element at once.
 
----
-
-## Music tab
-
-| Field  | What to enter                      |
-|--------|------------------------------------|
-| Artist | The artist's name, e.g. `Adele`    |
-| Song   | The song title, e.g. `Rolling in the Deep` |
-
-The app searches for the **official music video**, automatically excluding live
-performances, concerts, covers, acoustic sessions, etc.
-
-**Format:**
-- **MP3 (audio only)** — 320 kbps MP3, requires ffmpeg
-- **MP4 (music video)** — full video file
-
----
-
-## Video tab
-
-| Field   | What to enter                                    |
-|---------|--------------------------------------------------|
-| Creator | The channel name, e.g. `Linus Tech Tips`         |
-| Title   | Approximate title, e.g. `RTX 5090 benchmarks`   |
-
-The app scores every search result by:
-- How closely the channel name matches the creator you entered
-- How closely the video title matches your query (word-level fuzzy matching)
-
-It picks the highest-scoring result and downloads it.
-
-**Quality:** Best / 1080p / 720p / 480p (Best and 1080p require ffmpeg to merge streams)
-
----
-
-## Downloads location
-
-Files go to `~/Downloads/YT Downloader/` by default.
-Click the **⚙** gear icon in the top-right to change it.
-
----
-
-## Troubleshooting
-
-| Problem | Fix |
-|---------|-----|
-| `ModuleNotFoundError: customtkinter` | Run `setup.bat` again |
-| MP3 download fails | ffmpeg is not on PATH — see setup above |
-| Wrong video found (Music) | Try including more of the official title, e.g. `Rolling in the Deep (Official Video)` |
-| Wrong video found (Video) | Add more distinctive words from the title |
+## Summary of Design Choices
+-   **Declarative Config**: All weights and rules are centralized for easy tuning.
+-   **Heuristic Ranking**: Jaccard similarity + blacklist/whitelist scoring instead of fragile regex matching.
+-   **Threaded Dispatch**: Worker threads handle all I/O; the UI thread only reads from a progress queue.
