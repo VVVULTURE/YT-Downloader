@@ -1,0 +1,20 @@
+{
+  "name": "yt-downloader-web",
+  "version": "1.0.0",
+  "description": "Web port of YT Downloader - fetch music (MP3) or video (MP4) from a YouTube link or search terms, right in the browser.",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "postinstall": "node scripts/download-ytdlp.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "archiver": "^8.0.0",
+    "express": "^4.19.2",
+    "ffmpeg-static": "^5.2.0"
+  }
+}

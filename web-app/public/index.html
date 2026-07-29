@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>YT Downloader</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="topbar">
+    <span class="brand">YT Downloader</span>
+  </div>
+
+  <main class="card">
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="music">MUSIC</button>
+      <button class="tab-btn" data-tab="video">VIDEO</button>
+    </div>
+
+    <!-- MUSIC TAB -->
+    <section class="tab-panel" id="panel-music">
+      <label>YouTube URL / Search Term</label>
+      <input type="text" id="m-link" placeholder="Paste YouTube video URL, or leave blank to search" />
+
+      <label>Artist Name</label>
+      <input type="text" id="m-artist" placeholder="Artist" />
+
+      <label>Song Name</label>
+      <input type="text" id="m-song" placeholder="Song Name" />
+
+      <label class="checkbox-row">
+        <input type="checkbox" id="m-playlist" />
+        If Video has list, Download everything
+      </label>
+
+      <div class="status" id="m-status">Waiting for request</div>
+      <button class="download-btn" id="m-download">Download MP3</button>
+    </section>
+
+    <!-- VIDEO TAB -->
+    <section class="tab-panel hidden" id="panel-video">
+      <label>YouTube URL / Search Term</label>
+      <input type="text" id="v-link" placeholder="Paste YouTube video URL, or leave blank to search" />
+
+      <label>Creator Name</label>
+      <input type="text" id="v-creator" placeholder="Creator" />
+
+      <label>Title</label>
+      <input type="text" id="v-title" placeholder="Title" />
+
+      <label>Quality</label>
+      <div class="segmented" id="v-quality">
+        <button class="seg-btn" data-value="best">Best</button>
+        <button class="seg-btn active" data-value="1080p">1080p</button>
+      </div>
+
+      <label class="checkbox-row">
+        <input type="checkbox" id="v-playlist" />
+        If Video has list, Download everything
+      </label>
+
+      <div class="status" id="v-status">Waiting for request</div>
+      <button class="download-btn" id="v-download">Download MP4</button>
+    </section>
+  </main>
+
+  <footer>
+    <span id="health-line">Checking server status…</span>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

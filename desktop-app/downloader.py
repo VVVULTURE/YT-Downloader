@@ -1,0 +1,515 @@
+# File: downloader.py 
+import os
+import sys
+import json
+import threading
+import queue
+from difflib import SequenceMatcher
+from tkinter import filedialog, messagebox
+import time # Import time for better thread control/sleep simulation if needed
+
+import customtkinter as ctk
+import yt_dlp
+
+
+# ── CONFIGURATION ────────────────────────────────-----------------------------
+DEFAULT_MUSIC_DIR = os.path.join(os.path.expanduser("~"), "Music", "YT-Music")
+DEFAULT_VIDEO_DIR = os.path.join(os.path.expanduser("~"), "Videos", "YT-Videos")
+SETTINGS_FILE = os.path.join(os.getenv("USERPROFILE", os.path.expanduser("~")), ".ytdl_app_settings.json")
+
+
+def _bundled_ffmpeg_dir():
+    """Returns the folder containing bundled ffmpeg.exe/ffprobe.exe when
+    running as a compiled PyInstaller exe (built via build_exe.bat), or
+    None when running from source — in which case yt-dlp falls back to
+    whatever ffmpeg is on the system PATH, same as before."""
+    if getattr(sys, "frozen", False):
+        base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+        candidate = os.path.join(base, "ffmpeg")
+        if os.path.isfile(os.path.join(candidate, "ffmpeg.exe")):
+            return candidate
+    return None
+
+
+FFMPEG_LOCATION = _bundled_ffmpeg_dir()
+
+scoring_config = json.loads("""
+{
+  "music": {
+    "blacklist": ["live", "concert", "performance", "stage", "acoustic", "cover", "karaoke"],
+    "whitelist": ["official music video", "official video", "music video"]
+  }
+}
+""")
+
+
+
+# ── SETTINGS HELPERS ──────────────────────────────────────────────── ---------
+def load_settings():
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r") as f:
+                data = json.load(f)
+            if "music_folder" in data and "video_folder" in data:
+                return data
+        except Exception:
+            pass
+    return {"music_folder": DEFAULT_MUSIC_DIR, "video_folder": DEFAULT_VIDEO_DIR}
+
+
+def save_settings(s):
+    try:
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump(s, f)
+    except Exception:
+        pass
+
+
+# ── SCORING CORE ────────────────────────────────────────────────-------------
+def _sim(a, b):
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+def score_music(entry, artist, song):
+    score = 0.0
+    title = (entry["title"] or "").lower()
+    channel = (entry["channel"] or entry["uploader"] or "").lower()
+
+    if _sim(song, title) > 0:
+        score += int(_sim(song, title) * 40)
+
+    if artist.lower() in channel:
+        score += 25
+    if "vevo" in channel:
+        score += 10
+
+    for b in scoring_config["music"]["blacklist"]:
+        if b in title and len(title.split()) > 3:
+            score -= 20
+
+    return score
+
+
+def score_video(entry, creator, title_q):
+    score = 15
+    channel = (entry["channel"] or entry["uploader"] or "").lower()
+    creator = creator.strip().lower()
+
+    if creator in channel:
+        score += 30
+    title = (entry["title"] or "").lower()
+    score += int(_sim(title_q, title) * 45)
+    return score
+
+
+# ── GUI COMPONENTS ────────────────────────────────-----------
+class App(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.settings = load_settings()
+        self.music_folder_var = ctk.StringVar(value=self.settings.get("music_folder", DEFAULT_MUSIC_DIR))
+        self.video_folder_var = ctk.StringVar(value=self.settings.get("video_folder", DEFAULT_VIDEO_DIR))
+        os.makedirs(self.music_folder_var.get(), exist_ok=True)
+        os.makedirs(self.video_folder_var.get(), exist_ok=True)
+        self.progress_queue = queue.Queue()
+
+        self.title("YT Downloader")
+        self.geometry("650x820") 
+        self._build()
+        self._poll_updates()
+
+
+    def _poll_updates(self):
+        while not self.progress_queue.empty():
+            message = self.progress_queue.get()
+            if message["type"] == "update":
+                widget, text, color = message["data"]
+
+                # Defensive check against None widget (Fix applied here)
+                if widget is None: 
+                    continue 
+                
+                try:
+                    if isinstance(widget, ctk.CTkProgressBar):
+                        widget.set(message["pct"])
+                    else:
+                        widget.configure(text=text, text_color=color)
+                except AttributeError as e:
+                    print(f"Caught internal error during update poll: {e}") # Log the error instead of crashing
+
+            elif message["type"] == "finish":
+                self._complete_operation(message["progress"], widget="m" or "v")
+
+        # Schedule the next check
+        self.after(100, self._poll_updates)
+
+
+    def _build(self):
+        bar = ctk.CTkFrame(self, height=52, corner_radius=0)
+        bar.pack(fill="x")
+
+        ctk.CTkLabel(bar, text="YT Downloader", font=("Segoe UI", 16, "bold")).pack(side="left", padx=15)
+
+        self.tabs = ctk.CTkTabview(self, corner_radius=10)
+        self.tabs.pack(fill="both", expand=True, padx=20, pady=10)
+        self.tabs.add("MUSIC")
+        self.tabs.add("VIDEO")
+
+        self._build_music()
+        self._build_video()
+        self._build_folder_settings()
+
+
+    def _build_folder_settings(self):
+        """Two output-folder pickers shown below the tabs/download buttons,
+        one for Music downloads and one for Video downloads."""
+        frame = ctk.CTkFrame(self, corner_radius=10)
+        frame.pack(fill="x", padx=20, pady=(0, 15))
+        frame.grid_columnconfigure(0, weight=1)
+
+        # Video Output Folder
+        ctk.CTkLabel(frame, text="Video Output Folder:", font=("Segoe UI", 12, "bold")).grid(
+            row=0, column=0, sticky="w", padx=(15, 5), pady=(12, 0))
+        ctk.CTkButton(frame, text="Browse", width=70, command=self._browse_video_folder).grid(
+            row=0, column=1, padx=(5, 5), pady=(12, 0))
+        ctk.CTkButton(frame, text="Open", width=70, command=self._open_video_folder).grid(
+            row=0, column=2, padx=(0, 15), pady=(12, 0))
+        ctk.CTkLabel(frame, textvariable=self.video_folder_var, text_color="#9aa0a6", anchor="w").grid(
+            row=1, column=0, columnspan=3, sticky="w", padx=15, pady=(0, 10))
+
+        # Music Output Folder
+        ctk.CTkLabel(frame, text="Music Output Folder:", font=("Segoe UI", 12, "bold")).grid(
+            row=2, column=0, sticky="w", padx=(15, 5), pady=(0, 0))
+        ctk.CTkButton(frame, text="Browse", width=70, command=self._browse_music_folder).grid(
+            row=2, column=1, padx=(5, 5))
+        ctk.CTkButton(frame, text="Open", width=70, command=self._open_music_folder).grid(
+            row=2, column=2, padx=(0, 15))
+        ctk.CTkLabel(frame, textvariable=self.music_folder_var, text_color="#9aa0a6", anchor="w").grid(
+            row=3, column=0, columnspan=3, sticky="w", padx=15, pady=(0, 12))
+
+
+    def _save_folder_settings(self):
+        save_settings({
+            "music_folder": self.music_folder_var.get(),
+            "video_folder": self.video_folder_var.get(),
+        })
+
+    def _browse_music_folder(self):
+        path = filedialog.askdirectory(initialdir=self.music_folder_var.get() or DEFAULT_MUSIC_DIR)
+        if path:
+            self.music_folder_var.set(path)
+            os.makedirs(path, exist_ok=True)
+            self._save_folder_settings()
+
+    def _browse_video_folder(self):
+        path = filedialog.askdirectory(initialdir=self.video_folder_var.get() or DEFAULT_VIDEO_DIR)
+        if path:
+            self.video_folder_var.set(path)
+            os.makedirs(path, exist_ok=True)
+            self._save_folder_settings()
+
+    def _open_music_folder(self):
+        path = self.music_folder_var.get()
+        os.makedirs(path, exist_ok=True)
+        try:
+            os.startfile(path)
+        except Exception as e:
+            messagebox.showwarning("System Warning", f"Could not open folder (Check permissions?): {e}")
+
+    def _open_video_folder(self):
+        path = self.video_folder_var.get()
+        os.makedirs(path, exist_ok=True)
+        try:
+            os.startfile(path)
+        except Exception as e:
+            messagebox.showwarning("System Warning", f"Could not open folder (Check permissions?): {e}")
+
+
+    def _send_progress(self, widget, text="", color="#ffffff", pct=None):
+        """Sends progress updates to the queue."""
+        # Pass None for the widget if it's a general message (like "Starting download...")
+        self.progress_queue.put({"type": "update", "data": (widget, text, color), "pct": pct})
+
+    def _complete_operation(self, progress, widget):
+        if isinstance(progress, str):
+            try:
+                os.startfile(progress)
+            except Exception as e:
+                 messagebox.showwarning("System Warning", f"Could not open folder (Check permissions?): {e}")
+
+        # We use a fixed completion status for better user feedback on successful download/search failure
+        success_text = "Download Finished!" if widget == "v" else "Download Finished!"
+        self._send_progress(None, success_text, "#2ecc71", 1.0)
+
+
+    def _perform_download(self, url, mode, download_playlist=False, label=None):
+        """Performs the download for a given URL and mode.
+
+        download_playlist: if False (default), only the single requested
+        video/track is downloaded even if the URL is part of a playlist or
+        YouTube "radio mix" (list=... param). If True, and the URL is part
+        of a playlist, the entire playlist is downloaded.
+
+        label: the status label widget (m_lbl or v_lbl) to update once
+        everything for this request has finished downloading.
+        """
+        folder = self.music_folder_var.get() if mode == "music" else self.video_folder_var.get()
+        os.makedirs(folder, exist_ok=True)
+
+        # 1. Define progress hook function
+        def progress_hook(d):
+            if d['status'] == 'downloading':
+                progress = d.get('_percent_str', '0%')
+                self._send_progress(None, f"Downloading: {progress}...", "#ffcc00", float("".join(filter(str.isdigit, progress))) / 100)
+            elif d['status'] == 'finished':
+                 # Trigger a general "downloading" message when done
+                self._send_progress(None, f"Post-processing files...", "#ffcc00", 1.0)
+
+
+        try:
+            if mode == "music":
+                dl_opts = {
+                    "format": "bestaudio/best",
+                    "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "320"}],
+                    "outtmpl": os.path.join(folder, "%(title)s-%(id)s.%(ext)s"), 
+                    "quiet": True,
+                    "noplaylist": not download_playlist,
+                }
+            else: # Video mode
+                dl_opts = {
+                    "format": "bestvideo+bestaudio/best",
+                    "merge_output_format": "mp4",
+                    "outtmpl": os.path.join(folder, "%(title)s-%(id)s.%(ext)s"),
+                    "quiet": True,
+                    "noplaylist": not download_playlist,
+                }
+
+            # Point yt-dlp at the bundled ffmpeg when running as the compiled
+            # exe, so the app works with no separate ffmpeg install needed.
+            if FFMPEG_LOCATION:
+                dl_opts["ffmpeg_location"] = FFMPEG_LOCATION
+
+            # Add the progress hook to pass real-time status updates
+            dl_opts['progress_hooks'] = [progress_hook] 
+            
+            with yt_dlp.YoutubeDL(dl_opts) as ydl:
+                ydl.download([url])
+                # Everything for this request (single item or full list) is done.
+                self._send_progress(label, "Finished", "#2ecc71", 1.0)
+                return folder
+
+        except yt_dlp.DownloadError as e:
+            error_text = str(e)
+            messagebox.showerror(
+                "Download Error",
+                "The video or music appears to be unavailable, private, or does not exist.\n\n"
+                f"Details:\n{error_text}"
+            )
+            self._send_progress(label, "ERROR: Content Not Found/Unavailable.", "#ef4444", 0)
+            return None
+        except Exception as e:
+             error_text = str(e)
+             messagebox.showerror(
+                 "Download Error",
+                 "An unexpected system error occurred during download (Check FFmpeg and internet connection).\n\n"
+                 f"Details:\n{error_text}"
+             )
+             self._send_progress(label, "SYSTEM ERROR.", "#ef4444", 0)
+             return None
+
+
+    def _build_music(self):
+        tab = self.tabs.tab("MUSIC")
+        
+        ctk.CTkLabel(tab, text="YouTube URL / Search Term:").pack(pady=(5, 0))
+        self.m_link = ctk.CTkEntry(tab, placeholder_text="Paste YouTube Video URL or 'Artist Song Title'")
+        self.m_link.pack(fill='x', padx=20)
+
+        ctk.CTkLabel(tab, text="Artist Name:").pack(pady=(10, 0))
+        self.m_artist = ctk.CTkEntry(tab, placeholder_text="Artist")
+        self.m_artist.pack(fill='x', padx=20)
+        
+        ctk.CTkLabel(tab, text="Song Name:").pack(pady=(5, 0))
+        self.m_song = ctk.CTkEntry(tab, placeholder_text="Song Name")
+        self.m_song.pack(fill='x', padx=20)
+
+        self.m_fmt = ctk.CTkSegmentedButton(tab, values=["MP3", "MP4"])
+        self.m_fmt.set("MP3")
+        self.m_fmt.pack(pady=(10, 5))
+
+        self.m_playlist_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            tab,
+            text="If Video has list, Download everything",
+            variable=self.m_playlist_var,
+            onvalue=True,
+            offvalue=False,
+        ).pack(pady=(10, 5))
+
+        self.m_lbl = ctk.CTkLabel(tab, text="Waiting for request")
+        self.m_lbl.pack()
+
+        ctk.CTkButton(tab, text="Download", command=lambda: self._start_music()).pack(pady=(20, 10))
+
+
+    def _build_video(self):
+        tab = self.tabs.tab("VIDEO")
+
+        ctk.CTkLabel(tab, text="YouTube URL / Search Term:").pack(pady=(5, 0))
+        self.v_link = ctk.CTkEntry(tab, placeholder_text="Paste YouTube Video URL or 'Creator Title'")
+        self.v_link.pack(fill='x', padx=20)
+
+        ctk.CTkLabel(tab, text="Creator Name:").pack(pady=(10, 0))
+        self.v_creator = ctk.CTkEntry(tab, placeholder_text="Creator")
+        self.v_creator.pack(fill='x', padx=20)
+
+        ctk.CTkLabel(tab, text="Title:").pack(pady=(5, 0))
+        self.v_title = ctk.CTkEntry(tab, placeholder_text="Title")
+        self.v_title.pack(fill='x', padx=20)
+
+
+        self.v_qual = ctk.CTkSegmentedButton(tab, values=["Best", "1080p"], corner_radius=6)
+        self.v_qual.set("1080p")
+        self.v_qual.pack(pady=(5, 2))
+
+        self.v_playlist_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            tab,
+            text="If Video has list, Download everything",
+            variable=self.v_playlist_var,
+            onvalue=True,
+            offvalue=False,
+        ).pack(pady=(10, 5))
+
+        self.v_lbl = ctk.CTkLabel(tab, text="Waiting for request")
+        self.v_lbl.pack()
+
+        ctk.CTkButton(tab, text="Download", command=lambda: self._start_video()).pack(pady=(20, 10))
+
+
+    def _start_music(self):
+        artist = self.m_artist.get()
+        song = self.m_song.get()
+        link = self.m_link.get().strip()
+
+        if not link and not artist and not song:
+            messagebox.showerror("Error", "Please provide at least a URL or search terms.")
+            return
+        
+        def worker():
+            try:
+                # 1. Link Download (Direct download attempt) - Highest Priority
+                if link:
+                    url = link
+                    mode = "music"
+                    self._send_progress(self.m_lbl, f"Attempting direct download from URL...", "#ffcc00", 0)
+                    # The progress tracking now happens inside _perform_download
+                    return self._perform_download(url, mode, download_playlist=self.m_playlist_var.get(), label=self.m_lbl)
+
+                # 2. Search Fallback
+                if not artist and not song:
+                    messagebox.showerror("Error", "Please enter both Artist and Song Name for search.")
+                    return
+
+                # --- Search Phase (Metadata Extraction) ---
+                self._send_progress(self.m_lbl, "Searching YouTube...", "#ffcc00", 0)
+                
+                with yt_dlp.YoutubeDL({"quiet": True, "extract_flat": True}) as ydl:
+                    query = ""
+                    if artist and song:
+                        query = f"{artist} {song}"
+                    elif artist:
+                         query = f"'{artist}' official music video" 
+                    else:
+                         query = f"'{song}' song official"
+
+                    res = ydl.extract_info(f"ytsearch10:{query}", download=False)
+                    entries = res.get("entries") or []
+
+                if not entries:
+                    self._send_progress(self.m_lbl, "No matching videos found via search", "#ef4444", 0)
+                    return None # Indicate failure to find content
+
+                best_tuple = max([(score_music(e, artist, song), e) for e in entries], key=lambda x: x[0])
+                best_entry = best_tuple[1]
+                self._send_progress(self.m_lbl, "Match selected via search", "#2ecc71", 0.25)
+
+                mode = "music" if self.m_fmt.get() == "MP3" else "video"
+                url = f"https://www.youtube.com/watch?v={best_entry['id']}"
+                
+                # --- Download Phase ---
+                return self._perform_download(url, mode, download_playlist=self.m_playlist_var.get(), label=self.m_lbl)
+
+            except yt_dlp.DownloadError:
+                messagebox.showerror("Download Error", "The searched content appears to be unavailable or does not exist.")
+                self._send_progress(self.m_lbl, "ERROR: Content Not Found/Unavailable.", "#ef4444", 0)
+            except Exception as err:
+                messagebox.showerror("Error", f"An unexpected error occurred: {err}")
+
+
+        threading.Thread(target=worker).start()
+
+
+    def _start_video(self):
+        creator = self.v_creator.get()
+        title = self.v_title.get()
+        link = self.v_link.get().strip()
+
+        if not link and not creator and not title:
+            messagebox.showerror("Error", "Please provide at least a URL or search terms.")
+            return
+        
+        def worker():
+            try:
+                # 1. Link Download (Direct download attempt) - Highest Priority
+                if link:
+                    url = link
+                    mode = "video"
+                    self._send_progress(self.v_lbl, f"Attempting direct download from URL...", "#ffcc00", 0)
+                    return self._perform_download(url, mode, download_playlist=self.v_playlist_var.get(), label=self.v_lbl)
+
+                # 2. Search Fallback
+                if not creator and not title:
+                    messagebox.showerror("Error", "Please enter both Creator Name and Title for search.")
+                    return
+
+                # --- Search Phase (Metadata Extraction) ---
+                self._send_progress(self.v_lbl, "Searching YouTube...", "#ffcc00", 0)
+
+                with yt_dlp.YoutubeDL({"quiet": True, "extract_flat": True}) as ydl:
+                    query = ""
+                    if creator and title:
+                        query = f"{creator} {title}"
+                    elif creator:
+                         query = f"'{creator}' official videos"
+                    else:
+                         query = f"'{title}' video official"
+
+                    res = ydl.extract_info(f"ytsearch20:{query}", download=False)
+
+                if not res.get("entries"):
+                    self._send_progress(self.v_lbl, "No matching videos found via search", "#ef4444", 0)
+                    return None
+
+                best_tuple = max([(score_video(e, creator, title), e) for e in res.get("entries")], key=lambda x: x[0])
+                best_entry = best_tuple[1]
+                self._send_progress(self.v_lbl, "Match selected via search", "#2ecc71", 0.25)
+
+                mode = "video"
+                url = f"https://www.youtube.com/watch?v={best_entry['id']}"
+                
+                # --- Download Phase ---
+                return self._perform_download(url, mode, download_playlist=self.v_playlist_var.get(), label=self.v_lbl)
+
+            except yt_dlp.DownloadError:
+                 messagebox.showerror("Download Error", "The searched content appears to be unavailable or does not exist.")
+                 self._send_progress(self.v_lbl, "ERROR: Content Not Found/Unavailable.", "#ef4444", 0)
+            except Exception as err:
+                messagebox.showerror("Error", f"An unexpected error occurred: {err}")
+
+
+        threading.Thread(target=worker).start()
+
+
+if __name__ == "__main__":
+    app = App()
+    app.mainloop()
