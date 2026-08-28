@@ -197,16 +197,6 @@ def _asset_path(name):
     return os.path.join(base, "assets", name)
 
 
-# Running from source: the icon files aren't checked into git as binaries —
-# regenerate them from the base64 in assets_data.py the first time.
-if not getattr(sys, "frozen", False):
-    try:
-        import assets_data
-        assets_data.materialize(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets"))
-    except Exception:
-        pass
-
-
 APP_ICON_ICO = _asset_path("YT-Downloader.ico")
 APP_ICON_PNG = _asset_path("YT-Downloader.png")
 
