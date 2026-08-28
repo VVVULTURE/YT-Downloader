@@ -18,7 +18,3 @@ ffmpeg_bin/
 
 # Inno Setup output
 installer_output/
-
-# App icons — regenerated from assets_data.py (base64), not stored as binaries
-assets/YT-Downloader.ico
-assets/YT-Downloader.png

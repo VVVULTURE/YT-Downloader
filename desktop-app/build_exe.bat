@@ -160,10 +160,6 @@ echo.
 
 cd /d "%~dp0"
 
-:: Regenerate the icon files from the base64 embedded in assets_data.py
-:: (they are not checked into git as binaries).
-"%PYTHON_EXE%" "%~dp0assets_data.py" "%~dp0assets"
-
 "%PYTHON_EXE%" -m PyInstaller ^
     --noconfirm ^
     --onefile ^

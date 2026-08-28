@@ -37,12 +37,10 @@ Double-click **run.bat** (or `python downloader.py`).
 Double-click **build_exe.bat**. It will:
 1. Make sure `customtkinter` and `yt-dlp` are installed
 2. Install/upgrade PyInstaller
-3. Regenerate the app icons from `assets_data.py` (they're stored as base64
-   text, not binaries — see `assets/`)
-4. Locate ffmpeg/ffprobe on your system, or automatically download a static
+3. Locate ffmpeg/ffprobe on your system, or automatically download a static
    build if they aren't found
-5. Compile `downloader.py` into `YT-Downloader.exe`, with the icon and ffmpeg
-   bundled inside it
+4. Compile `downloader.py` into `YT-Downloader.exe`, with the app icon
+   (`assets/YT-Downloader.ico`) and ffmpeg bundled inside it
 
 When it finishes, `YT-Downloader.exe` will be sitting next to this README —
 you can move/share that single file and run it on any Windows 10/11 machine
