@@ -122,10 +122,12 @@ def _refresh_ytdlp(force=False):
 
 
 class _YtdlpFromZipapp:
-    """Meta-path finder that makes `import yt_dlp` resolve to our downloaded
-    zipapp. Needed because in the PyInstaller build, PyInstaller's own frozen
-    importer sits ahead of sys.path and would otherwise always return the
-    stale bundled yt_dlp regardless of what we prepend to sys.path."""
+    """Meta-path finder that makes `yt_dlp` (and every `yt_dlp.*` submodule)
+    resolve to our downloaded zipapp. Needed because in the PyInstaller build,
+    PyInstaller's own frozen importer sits ahead of sys.path and bundles every
+    yt_dlp submodule, so it would otherwise keep serving the stale bundled copy
+    no matter what we prepend to sys.path. Inserted at the front of
+    sys.meta_path so it is consulted before the frozen importer."""
 
     def __init__(self, zip_path):
         self._paths = [zip_path]
@@ -133,6 +135,9 @@ class _YtdlpFromZipapp:
     def find_spec(self, name, path=None, target=None):
         if name == "yt_dlp":
             return importlib.machinery.PathFinder.find_spec("yt_dlp", self._paths, target)
+        if name.startswith("yt_dlp."):
+            # `path` is the parent package's __path__, already inside the zip.
+            return importlib.machinery.PathFinder.find_spec(name, path, target)
         return None
 
 
