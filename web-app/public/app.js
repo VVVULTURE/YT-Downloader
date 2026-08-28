@@ -16,7 +16,7 @@
     });
   });
 
-  // ── Video quality segmented control ───────────────────────────────
+  // ── Video quality segmented control ────────────────────────────────
   const qualityWrap = document.getElementById('v-quality');
   let selectedQuality = '1080p';
   qualityWrap.querySelectorAll('.seg-btn').forEach((btn) => {
@@ -27,7 +27,7 @@
     });
   });
 
-  // ── Bitrate sliders (mirror the desktop app) ──────────────────────
+  // ── Bitrate sliders (mirror the desktop app) ───────────────────────
   // Each slider is a plain 0..N range input; the value maps to an entry in
   // `choices`. `render` turns a choice into its label. The defaults (last
   // entry of each) reproduce the previous behaviour: 320 kbps MP3, and no
@@ -96,7 +96,8 @@
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error(err.details || err.error || `Request failed (${res.status})`);
+        const parts = [err.error, err.details].filter(Boolean);
+        throw new Error(parts.join('\n\n') || `Request failed (${res.status})`);
       }
 
       // Pull the filename the server suggested, then trigger a browser download.

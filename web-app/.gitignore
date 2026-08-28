@@ -5,6 +5,9 @@ bin/
 .vercel/
 .DS_Store
 
+# YouTube cookies — these are account credentials, never commit them.
+cookies.txt
+
 # Not committed: every deploy target (Render / Docker / Vercel / local) runs
 # `npm install`, which regenerates this from package.json. Keeping it out of
 # git avoids it drifting stale. Re-add it if you switch to `npm ci`.

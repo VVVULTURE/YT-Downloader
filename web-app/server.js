@@ -22,6 +22,23 @@ const YTDLP_PATH =
   process.env.YTDLP_PATH ||
   path.join(__dirname, 'bin', process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
 
+// YouTube shows "Sign in to confirm you're not a bot" for requests from
+// datacenter IPs (i.e. basically every host — Render, Fly, a VPS). The only
+// reliable fix is a cookies.txt from a logged-in (ideally throwaway) YouTube
+// account. Drop the file at any of these paths and it's used automatically:
+//   - $COOKIES_FILE (an explicit path you set)
+//   - cookies.txt next to server.js        (good for local dev; gitignored)
+//   - /etc/secrets/cookies.txt             (Render "Secret Files" default)
+// See web-app/README.md for how to export it. With no file present the app
+// still runs — it just can't get past the bot check on a server.
+const COOKIES_FILE = [
+  process.env.COOKIES_FILE,
+  path.join(__dirname, 'cookies.txt'),
+  '/etc/secrets/cookies.txt',
+].find((p) => p && fs.existsSync(p)) || null;
+
+const COOKIE_ARGS = COOKIES_FILE ? ['--cookies', COOKIES_FILE] : [];
+
 // ── Scoring helpers (ported from the desktop app's search-fallback logic) ──
 const scoringConfig = {
   music: {
@@ -174,6 +191,7 @@ async function searchYouTube(query, limit) {
     '--flat-playlist',
     '--dump-single-json',
     '--no-warnings',
+    ...COOKIE_ARGS,
     `ytsearch${limit}:${query}`,
   ]);
   const data = JSON.parse(stdout);
@@ -227,6 +245,8 @@ app.get('/api/health', async (req, res) => {
     ytdlpVersion,
     ffmpegPath,
     ffmpegPresent: fs.existsSync(ffmpegPath),
+    cookiesFile: COOKIES_FILE,
+    cookiesLoaded: Boolean(COOKIES_FILE),
   });
 });
 
@@ -304,6 +324,7 @@ app.post('/api/download', async (req, res) => {
       '--ffmpeg-location', ffmpegPath,
       '--retries', '5',
       '--fragment-retries', '10',
+      ...COOKIE_ARGS,
       '-o', outTemplate,
     ];
 
@@ -395,11 +416,17 @@ app.post('/api/download', async (req, res) => {
     fs.rm(workDir, { recursive: true, force: true }, () => {});
     const details = err.stderr || err.message || String(err);
     console.error('Download error:', details);
+
+    const looksLikeBotCheck = /sign in to confirm|not a bot|cookies/i.test(details);
+    let errorMsg = 'The video or music appears to be unavailable, private, or does not exist.';
+    if (looksLikeBotCheck) {
+      errorMsg = COOKIES_FILE
+        ? 'YouTube rejected the request even with cookies — the cookies file may be expired. Re-export it (see the web-app README).'
+        : "YouTube is asking this server to \"confirm you're not a bot\" (normal for a hosted IP). Add a cookies.txt file — see the web-app README, \"YouTube bot check\".";
+    }
+
     if (!res.headersSent) {
-      res.status(500).json({
-        error: 'The video or music appears to be unavailable, private, or does not exist.',
-        details,
-      });
+      res.status(500).json({ error: errorMsg, details });
     } else {
       res.destroy(err);
     }
@@ -410,6 +437,11 @@ app.listen(PORT, () => {
   console.log(`YT Downloader web server listening on port ${PORT}`);
   console.log(`yt-dlp: ${YTDLP_PATH} (${fs.existsSync(YTDLP_PATH) ? 'present' : 'MISSING'})`);
   console.log(`ffmpeg: ${ffmpegPath} (${fs.existsSync(ffmpegPath) ? 'present' : 'MISSING'})`);
+  console.log(
+    COOKIES_FILE
+      ? `cookies: ${COOKIES_FILE}`
+      : 'cookies: none — YouTube may block downloads with "confirm you\'re not a bot" (see README)'
+  );
 
   selfUpdateYtDlp();
   setInterval(selfUpdateYtDlp, 24 * 60 * 60 * 1000).unref();
