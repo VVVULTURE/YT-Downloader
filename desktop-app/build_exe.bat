@@ -43,7 +43,7 @@ if errorlevel 1 (
 )
 echo  [OK] Using: %PYTHON_EXE%
 
-:: ── 2. Make sure the app's own dependencies are installed ───────────────────
+:: ── 2. Make sure the app's own dependencies are installed ─────────────────────
 echo.
 echo  [1/4] Making sure app dependencies are installed...
 "%PYTHON_EXE%" -m pip install -r "%~dp0requirements.txt" --quiet
@@ -66,7 +66,7 @@ if errorlevel 1 (
 )
 echo  [OK] Dependencies ready.
 
-:: ── 3. Install PyInstaller ──────────────────────────────────────────
+:: ── 3. Install PyInstaller ─────────────────────────────────────────────────────
 echo.
 echo  [2/4] Installing/upgrading PyInstaller...
 "%PYTHON_EXE%" -m pip install --upgrade pyinstaller --quiet
@@ -77,7 +77,7 @@ if errorlevel 1 (
 )
 echo  [OK] PyInstaller ready.
 
-:: ── 4. Locate or download ffmpeg.exe / ffprobe.exe to bundle ────────────────
+:: ── 4. Locate or download ffmpeg.exe / ffprobe.exe to bundle ──────────────────
 echo.
 echo  [3/4] Preparing ffmpeg (to bundle inside the exe)...
 
@@ -153,23 +153,25 @@ copy /y "%FFMPEG_EXE%" "%FFMPEG_BIN_DIR%\ffmpeg.exe" >nul
 copy /y "%FFPROBE_EXE%" "%FFMPEG_BIN_DIR%\ffprobe.exe" >nul
 echo  [OK] Staged ffmpeg at: %FFMPEG_BIN_DIR%
 
-:: ── 5. Build the .exe, with ffmpeg bundled inside it ───────────────────────
+:: ── 5. Build the .exe, with ffmpeg bundled inside it ───────────────────────────
 echo.
 echo  [4/4] Building YT-Downloader.exe (this can take a few minutes)...
 echo.
 
 cd /d "%~dp0"
 
+:: The app icon (assets\) is optional — build without it if it isn't there.
+set "ICON_OPT="
+if exist "%~dp0assets\YT-Downloader.ico" set "ICON_OPT=--icon "%~dp0assets\YT-Downloader.ico" --add-data "%~dp0assets;assets""
+
 "%PYTHON_EXE%" -m PyInstaller ^
     --noconfirm ^
     --onefile ^
     --windowed ^
     --name "YT-Downloader" ^
-    --icon "%~dp0assets\YT-Downloader.ico" ^
+    %ICON_OPT% ^
     --collect-all customtkinter ^
     --collect-all yt_dlp ^
-    --add-data "%~dp0assets\YT-Downloader.ico;assets" ^
-    --add-data "%~dp0assets\YT-Downloader.png;assets" ^
     --add-binary "%FFMPEG_BIN_DIR%\ffmpeg.exe;ffmpeg" ^
     --add-binary "%FFMPEG_BIN_DIR%\ffprobe.exe;ffmpeg" ^
     downloader.py
