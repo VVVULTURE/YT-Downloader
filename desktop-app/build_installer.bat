@@ -32,8 +32,10 @@ echo  [2/3] Locating Inno Setup...
 
 set "ISCC_EXE="
 for /f "delims=" %%i in ('where ISCC 2^>nul') do if not defined ISCC_EXE set "ISCC_EXE=%%i"
-if not defined ISCC_EXE if exist "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" set "ISCC_EXE=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
-if not defined ISCC_EXE if exist "%ProgramFiles%\Inno Setup 6\ISCC.exe" set "ISCC_EXE=%ProgramFiles%\Inno Setup 6\ISCC.exe"
+for %%V in (7 6) do (
+    if not defined ISCC_EXE if exist "%ProgramFiles(x86)%\Inno Setup %%V\ISCC.exe" set "ISCC_EXE=%ProgramFiles(x86)%\Inno Setup %%V\ISCC.exe"
+    if not defined ISCC_EXE if exist "%ProgramFiles%\Inno Setup %%V\ISCC.exe" set "ISCC_EXE=%ProgramFiles%\Inno Setup %%V\ISCC.exe"
+)
 
 if defined ISCC_EXE (
     echo  [OK] Found Inno Setup: %ISCC_EXE%
@@ -85,8 +87,10 @@ if defined ISCC_EXE (
     echo  Installing Inno Setup ^(silent^)...
     "!IS_INSTALLER!" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-
 
-    if exist "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" set "ISCC_EXE=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
-    if not defined ISCC_EXE if exist "%ProgramFiles%\Inno Setup 6\ISCC.exe" set "ISCC_EXE=%ProgramFiles%\Inno Setup 6\ISCC.exe"
+    for %%V in (7 6) do (
+        if not defined ISCC_EXE if exist "%ProgramFiles(x86)%\Inno Setup %%V\ISCC.exe" set "ISCC_EXE=%ProgramFiles(x86)%\Inno Setup %%V\ISCC.exe"
+        if not defined ISCC_EXE if exist "%ProgramFiles%\Inno Setup %%V\ISCC.exe" set "ISCC_EXE=%ProgramFiles%\Inno Setup %%V\ISCC.exe"
+    )
 
     if not defined ISCC_EXE (
         echo.
@@ -99,7 +103,7 @@ if defined ISCC_EXE (
     echo  [OK] Inno Setup installed: %ISCC_EXE%
 )
 
-:: ── 3. Compile the installer ────────────────────────────────────────────────
+:: ── 3. Compile the installer ─────────────────────────────────────
 echo.
 echo  [3/3] Compiling YT-Downloader-Setup.exe...
 echo.

@@ -5,7 +5,7 @@
 ; Start Menu / Desktop shortcuts and an uninstaller.
 
 #define MyAppName "YT Downloader"
-#define MyAppVersion "1.0"
+#define MyAppVersion "3.1"
 #define MyAppExeName "YT-Downloader.exe"
 
 [Setup]
@@ -16,11 +16,12 @@ DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=admin
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir={#SourcePath}\installer_output
 OutputBaseFilename=YT-Downloader-Setup
 Compression=lzma2
 SolidCompression=yes
+SetupIconFile={#SourcePath}\assets\YT-Downloader.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
 
