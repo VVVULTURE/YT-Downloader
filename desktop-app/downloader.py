@@ -186,6 +186,30 @@ def _bundled_ffmpeg_dir():
 
 FFMPEG_LOCATION = _bundled_ffmpeg_dir()
 
+
+def _asset_path(name):
+    """Path to a file in assets/, whether running from source or as the
+    PyInstaller build (where assets/ is bundled next to the code)."""
+    if getattr(sys, "frozen", False):
+        base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, "assets", name)
+
+
+# Running from source: the icon files aren't checked into git as binaries —
+# regenerate them from the base64 in assets_data.py the first time.
+if not getattr(sys, "frozen", False):
+    try:
+        import assets_data
+        assets_data.materialize(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets"))
+    except Exception:
+        pass
+
+
+APP_ICON_ICO = _asset_path("YT-Downloader.ico")
+APP_ICON_PNG = _asset_path("YT-Downloader.png")
+
 scoring_config = json.loads("""
 {
   "music": {
@@ -266,13 +290,37 @@ class App(ctk.CTk):
         self.progress_queue = queue.Queue()
 
         self.title("YT Downloader")
-        self.geometry("650x820")
+        self.geometry("660x900")
+        self._apply_icon()
         self._build()
         self._poll_updates()
 
         # Keep yt-dlp current in the background so YouTube changes don't break
         # downloads. A newer copy is picked up on the next launch.
         threading.Thread(target=self._background_ytdlp_refresh, daemon=True).start()
+
+
+    def _apply_icon(self):
+        """Set the window / taskbar icon from assets/. The multi-size .ico via
+        iconbitmap is what Windows actually uses; the PhotoImage fallback covers
+        other platforms / the Alt-Tab switcher."""
+        try:
+            if os.path.isfile(APP_ICON_ICO):
+                self.iconbitmap(APP_ICON_ICO)
+        except Exception:
+            pass
+        try:
+            if os.path.isfile(APP_ICON_PNG):
+                import tkinter as tk
+                img = tk.PhotoImage(file=APP_ICON_PNG)
+                # 1024px source -> ~64px is plenty for a window icon
+                factor = max(1, img.width() // 64)
+                if factor > 1:
+                    img = img.subsample(factor, factor)
+                self._icon_photo = img  # keep a reference so Tk doesn't GC it
+                self.iconphoto(True, img)
+        except Exception:
+            pass
 
 
     def _background_ytdlp_refresh(self):
@@ -410,7 +458,8 @@ class App(ctk.CTk):
         self._send_progress(None, success_text, "#2ecc71", 1.0)
 
 
-    def _perform_download(self, url, mode, download_playlist=False, label=None):
+    def _perform_download(self, url, mode, download_playlist=False, label=None,
+                          audio_kbps=None, video_max_mbps=None):
         """Performs the download for a given URL and mode.
 
         download_playlist: if False (default), only the single requested
@@ -420,6 +469,10 @@ class App(ctk.CTk):
 
         label: the status label widget (m_lbl or v_lbl) to update once
         everything for this request has finished downloading.
+
+        audio_kbps: target MP3 bitrate for music downloads (default 320).
+        video_max_mbps: cap on video bitrate in Mbit/s for video downloads;
+        None means no cap (best available), which is the default.
         """
         folder = self.music_folder_var.get() if mode == "music" else self.video_folder_var.get()
         os.makedirs(folder, exist_ok=True)
@@ -436,16 +489,30 @@ class App(ctk.CTk):
 
         try:
             if mode == "music":
+                mp3_quality = str(int(audio_kbps)) if audio_kbps else "320"
                 dl_opts = {
                     "format": "bestaudio/best",
-                    "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "320"}],
+                    "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": mp3_quality}],
                     "outtmpl": os.path.join(folder, "%(title)s-%(id)s.%(ext)s"),
                     "quiet": True,
                     "noplaylist": not download_playlist,
                 }
             else: # Video mode
+                if video_max_mbps:
+                    # Cap video bitrate. `vbr`/`tbr` filters are in KBit/s.
+                    # Each clause falls back to the next so a video whose
+                    # formats don't report a bitrate still downloads.
+                    cap = int(float(video_max_mbps) * 1000)
+                    video_format = (
+                        f"bestvideo[vbr<={cap}]+bestaudio/"
+                        f"bestvideo[tbr<={cap}]+bestaudio/"
+                        f"best[tbr<={cap}]/"
+                        f"bestvideo+bestaudio/best"
+                    )
+                else:
+                    video_format = "bestvideo+bestaudio/best"
                 dl_opts = {
-                    "format": "bestvideo+bestaudio/best",
+                    "format": video_format,
                     "merge_output_format": "mp4",
                     "outtmpl": os.path.join(folder, "%(title)s-%(id)s.%(ext)s"),
                     "quiet": True,
@@ -509,6 +576,33 @@ class App(ctk.CTk):
              return None
 
 
+    def _bitrate_slider(self, parent, title, values, default, fmt):
+        """A labelled discrete slider. `values` is the ordered list of
+        selectable settings, `default` one of them, `fmt` renders one for
+        display. Returns a zero-arg callable giving the current selection."""
+        wrap = ctk.CTkFrame(parent, fg_color="transparent")
+        wrap.pack(fill="x", padx=20, pady=(8, 0))
+
+        ctk.CTkLabel(wrap, text=title, font=("Segoe UI", 12, "bold")).pack(anchor="w")
+        value_lbl = ctk.CTkLabel(wrap, text=fmt(default), text_color="#9aa0a6")
+        value_lbl.pack(anchor="w")
+
+        state = {"i": values.index(default)}
+
+        def on_move(v):
+            state["i"] = int(round(float(v)))
+            value_lbl.configure(text=fmt(values[state["i"]]))
+
+        slider = ctk.CTkSlider(
+            wrap, from_=0, to=len(values) - 1,
+            number_of_steps=len(values) - 1, command=on_move,
+        )
+        slider.set(state["i"])
+        slider.pack(fill="x", pady=(2, 0))
+
+        return lambda: values[state["i"]]
+
+
     def _build_music(self):
         tab = self.tabs.tab("MUSIC")
 
@@ -527,6 +621,13 @@ class App(ctk.CTk):
         self.m_fmt = ctk.CTkSegmentedButton(tab, values=["MP3", "MP4"])
         self.m_fmt.set("MP3")
         self.m_fmt.pack(pady=(10, 5))
+
+        # Audio bitrate for MP3 downloads. Default 320 = the previous behaviour.
+        self.m_bitrate = self._bitrate_slider(
+            tab, "Audio Bitrate (MP3)",
+            [128, 160, 192, 256, 320], 320,
+            lambda v: f"{v} kbps" + ("  (default)" if v == 320 else ""),
+        )
 
         self.m_playlist_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
@@ -563,6 +664,14 @@ class App(ctk.CTk):
         self.v_qual.set("1080p")
         self.v_qual.pack(pady=(5, 2))
 
+        # Video bitrate cap. "Max" (default) = the previous behaviour: take the
+        # best available stream with no bitrate limit.
+        self.v_bitrate = self._bitrate_slider(
+            tab, "Max Video Bitrate",
+            [2, 4, 6, 8, 12, 16, 20, None], None,
+            lambda v: "Max — best available  (default)" if v is None else f"≤ {v} Mbps",
+        )
+
         self.v_playlist_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
             tab,
@@ -587,6 +696,8 @@ class App(ctk.CTk):
             messagebox.showerror("Error", "Please provide at least a URL or search terms.")
             return
 
+        audio_kbps = self.m_bitrate()
+
         def worker():
             try:
                 # 1. Link Download (Direct download attempt) - Highest Priority
@@ -595,7 +706,7 @@ class App(ctk.CTk):
                     mode = "music"
                     self._send_progress(self.m_lbl, f"Attempting direct download from URL...", "#ffcc00", 0)
                     # The progress tracking now happens inside _perform_download
-                    return self._perform_download(url, mode, download_playlist=self.m_playlist_var.get(), label=self.m_lbl)
+                    return self._perform_download(url, mode, download_playlist=self.m_playlist_var.get(), label=self.m_lbl, audio_kbps=audio_kbps)
 
                 # 2. Search Fallback
                 if not artist and not song:
@@ -629,7 +740,7 @@ class App(ctk.CTk):
                 url = f"https://www.youtube.com/watch?v={best_entry['id']}"
 
                 # --- Download Phase ---
-                return self._perform_download(url, mode, download_playlist=self.m_playlist_var.get(), label=self.m_lbl)
+                return self._perform_download(url, mode, download_playlist=self.m_playlist_var.get(), label=self.m_lbl, audio_kbps=audio_kbps)
 
             except yt_dlp.DownloadError:
                 messagebox.showerror("Download Error", "The searched content appears to be unavailable or does not exist.")
@@ -650,6 +761,8 @@ class App(ctk.CTk):
             messagebox.showerror("Error", "Please provide at least a URL or search terms.")
             return
 
+        video_max_mbps = self.v_bitrate()
+
         def worker():
             try:
                 # 1. Link Download (Direct download attempt) - Highest Priority
@@ -657,7 +770,7 @@ class App(ctk.CTk):
                     url = link
                     mode = "video"
                     self._send_progress(self.v_lbl, f"Attempting direct download from URL...", "#ffcc00", 0)
-                    return self._perform_download(url, mode, download_playlist=self.v_playlist_var.get(), label=self.v_lbl)
+                    return self._perform_download(url, mode, download_playlist=self.v_playlist_var.get(), label=self.v_lbl, video_max_mbps=video_max_mbps)
 
                 # 2. Search Fallback
                 if not creator and not title:
@@ -690,7 +803,7 @@ class App(ctk.CTk):
                 url = f"https://www.youtube.com/watch?v={best_entry['id']}"
 
                 # --- Download Phase ---
-                return self._perform_download(url, mode, download_playlist=self.v_playlist_var.get(), label=self.v_lbl)
+                return self._perform_download(url, mode, download_playlist=self.v_playlist_var.get(), label=self.v_lbl, video_max_mbps=video_max_mbps)
 
             except yt_dlp.DownloadError:
                  messagebox.showerror("Download Error", "The searched content appears to be unavailable or does not exist.")
