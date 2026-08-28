@@ -129,7 +129,7 @@ function buildVideoFormat(quality, videoMaxMbps) {
   return [...new Set(clauses)].join('/');
 }
 
-// ── yt-dlp process helpers ────────────────────────────────────────
+// ── yt-dlp process helpers ───────────────────────────────────────────────
 function ensureExecutable(filePath) {
   // Some serverless platforms (notably Vercel) can strip the executable bit
   // off bundled binaries when packaging a function. This is a harmless
@@ -198,7 +198,7 @@ async function searchYouTube(query, limit) {
   return data.entries || [];
 }
 
-// ── Keep-alive self-ping ───────────────────────────────────────
+// ── Keep-alive self-ping ────────────────────────────────────────────────
 // Render's free tier spins a web service down after ~15 min with no inbound
 // traffic (the next visitor then waits ~30-60s for a cold start). Pinging our
 // own public URL on a timer keeps it warm. Render sets RENDER_EXTERNAL_URL
@@ -221,7 +221,7 @@ function keepAlivePing() {
     .catch((e) => console.error(`[keep-alive] ${target} failed: ${e.message || e}`));
 }
 
-// ── API routes ───────────────────────────────────────────────────
+// ── API routes ───────────────────────────────────────────────────────────
 
 // Ultra-light endpoint for the keep-alive ping (and any external uptime
 // monitor). `/api/health` is the richer diagnostic one.
@@ -348,27 +348,37 @@ app.post('/api/download', async (req, res) => {
 
     args.push(url);
 
-    // YouTube periodically 403s whichever player client yt-dlp picks by
-    // default. Retry with alternate clients before giving up; a genuinely
-    // private/removed video fails on all of them and still surfaces below.
-    const clientFallbacks = [null, 'tv', 'web_safari', 'ios', 'android', 'mweb'];
+    // YouTube keeps breaking one "player client" or another for hosted IPs
+    // (403 Forbidden; "The page needs to be reloaded" from tv_downgraded when
+    // cookies are set; SABR / PO-token issues; ...). Try a sequence of client
+    // sets and use the first that works. `default,-tv` is the current
+    // recommended workaround for the "page needs to be reloaded" error.
+    // A genuinely private/removed video fails on every one and the last
+    // error is surfaced below.
+    const clientAttempts = [
+      'default',            // best quality when it works
+      'default,-tv',        // tv_downgraded is currently broken with cookies
+      'default,web_embedded',
+      'web_safari,mweb',
+      'ios',
+      'android',
+    ];
+    // Errors no client can get past — bail out immediately instead of
+    // retrying all six.
+    const TERMINAL = /this video is private|private video|members[- ]only|join this channel|has been removed by|account associated with this video has been terminated|video has been removed for violating/i;
+
     let lastErr = null;
     let downloaded = false;
-    for (const client of clientFallbacks) {
-      const attemptArgs = client
-        ? ['--extractor-args', `youtube:player_client=${client}`, ...args]
-        : args;
+    for (const clients of clientAttempts) {
       try {
-        await runYtDlp(attemptArgs);
+        await runYtDlp(['--extractor-args', `youtube:player_client=${clients}`, ...args]);
         downloaded = true;
         break;
       } catch (e) {
         lastErr = e;
-        const msg = `${e.stderr || e.message || ''}`.toLowerCase();
-        if (msg.includes('403') || msg.includes('forbidden') || msg.includes('player') || msg.includes('sign in')) {
-          continue;
-        }
-        throw e;
+        if (TERMINAL.test(`${e.stderr || e.message || ''}`)) break;
+        // Otherwise retry with the next client set — the errors above are all
+        // client-specific and a truly gone video just fails again anyway.
       }
     }
     if (!downloaded) throw lastErr;
@@ -417,12 +427,15 @@ app.post('/api/download', async (req, res) => {
     const details = err.stderr || err.message || String(err);
     console.error('Download error:', details);
 
-    const looksLikeBotCheck = /sign in to confirm|not a bot|cookies/i.test(details);
     let errorMsg = 'The video or music appears to be unavailable, private, or does not exist.';
-    if (looksLikeBotCheck) {
+    if (/sign in to confirm|not a bot/i.test(details)) {
       errorMsg = COOKIES_FILE
         ? 'YouTube rejected the request even with cookies — the cookies file may be expired. Re-export it (see the web-app README).'
         : "YouTube is asking this server to \"confirm you're not a bot\" (normal for a hosted IP). Add a cookies.txt file — see the web-app README, \"YouTube bot check\".";
+    } else if (/page needs to be reloaded|only images are available|sabr/i.test(details)) {
+      errorMsg =
+        'YouTube is temporarily blocking every extraction method for this video from this server ' +
+        '(a known, recurring YouTube-side issue). Try again in a bit, or update yt-dlp.';
     }
 
     if (!res.headersSent) {
