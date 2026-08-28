@@ -37,10 +37,12 @@ Double-click **run.bat** (or `python downloader.py`).
 Double-click **build_exe.bat**. It will:
 1. Make sure `customtkinter` and `yt-dlp` are installed
 2. Install/upgrade PyInstaller
-3. Locate ffmpeg/ffprobe on your system, or automatically download a static
+3. Regenerate the app icons from `assets_data.py` (they're stored as base64
+   text, not binaries — see `assets/`)
+4. Locate ffmpeg/ffprobe on your system, or automatically download a static
    build if they aren't found
-4. Compile `downloader.py` into `YT-Downloader.exe`, with ffmpeg bundled
-   inside it
+5. Compile `downloader.py` into `YT-Downloader.exe`, with the icon and ffmpeg
+   bundled inside it
 
 When it finishes, `YT-Downloader.exe` will be sitting next to this README —
 you can move/share that single file and run it on any Windows 10/11 machine
@@ -55,8 +57,8 @@ with **no separate Python or ffmpeg install needed**.
 Double-click **build_installer.bat**. It will:
 1. Build `YT-Downloader.exe` first if it doesn't already exist (via
    `build_exe.bat`)
-2. Locate Inno Setup, or automatically download and silently install it if
-   it isn't on your system
+2. Locate Inno Setup 6 or 7, or automatically download and silently install
+   it if it isn't on your system
 3. Compile `YT-Downloader-Setup.exe` into `installer_output\`
 
 Share that one `YT-Downloader-Setup.exe` file. Running it on someone's
@@ -83,8 +85,11 @@ The app searches for the **official music video**, automatically excluding live
 performances, concerts, covers, acoustic sessions, etc.
 
 **Format:**
-- **MP3 (audio only)** — 320 kbps MP3, requires ffmpeg
+- **MP3 (audio only)** — requires ffmpeg
 - **MP4 (music video)** — full video file
+
+**Audio Bitrate slider** — 128 / 160 / 192 / 256 / 320 kbps for the MP3.
+Leave it where it starts (320 kbps) for the same quality as before.
 
 ---
 
@@ -101,7 +106,10 @@ The app scores every search result by:
 
 It picks the highest-scoring result and downloads it.
 
-**Quality:** Best / 1080p / 720p / 480p (Best and 1080p require ffmpeg to merge streams)
+**Max Video Bitrate slider** — cap the download at ≤ 2 / 4 / 6 / 8 / 12 / 16 /
+20 Mbps, or leave it at **Max** (the default) to take the best available
+stream with no limit. Lowering it trades quality for a much smaller file.
+(ffmpeg is needed to merge the video + audio streams.)
 
 ---
 
