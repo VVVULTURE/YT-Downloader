@@ -1,5 +1,5 @@
 (() => {
-  // ── Tabs ──────────────────────────────────────────────────────────────
+  // ── Tabs ─────────────────────────────────────────────────
   const tabBtns = document.querySelectorAll('.tab-btn');
   const panels = {
     music: document.getElementById('panel-music'),
@@ -16,7 +16,7 @@
     });
   });
 
-  // ── Video quality segmented control ─────────────────────────────────────
+  // ── Video quality segmented control ───────────────────────────────
   const qualityWrap = document.getElementById('v-quality');
   let selectedQuality = '1080p';
   qualityWrap.querySelectorAll('.seg-btn').forEach((btn) => {
@@ -27,7 +27,35 @@
     });
   });
 
-  // ── Health check (shown in the footer) ──────────────────────────────────
+  // ── Bitrate sliders (mirror the desktop app) ──────────────────────
+  // Each slider is a plain 0..N range input; the value maps to an entry in
+  // `choices`. `render` turns a choice into its label. The defaults (last
+  // entry of each) reproduce the previous behaviour: 320 kbps MP3, and no
+  // video bitrate cap.
+  function wireSlider(inputId, labelId, choices, render) {
+    const input = document.getElementById(inputId);
+    const label = document.getElementById(labelId);
+    const update = () => {
+      label.textContent = render(choices[Number(input.value)]);
+    };
+    input.addEventListener('input', update);
+    update();
+    return () => choices[Number(input.value)];
+  }
+
+  const getAudioKbps = wireSlider(
+    'm-bitrate', 'm-bitrate-val',
+    [128, 160, 192, 256, 320],
+    (v) => `${v} kbps`
+  );
+
+  const getVideoMaxMbps = wireSlider(
+    'v-bitrate', 'v-bitrate-val',
+    [2, 4, 6, 8, 12, 16, 20, null],
+    (v) => (v === null ? 'Max' : `≤ ${v} Mbps`)
+  );
+
+  // ── Health check (shown in the footer) ────────────────────────────
   fetch('/api/health')
     .then((r) => r.json())
     .then((data) => {
@@ -43,8 +71,11 @@
       document.getElementById('health-line').textContent = 'Could not reach the server.';
     });
 
-  // ── Shared download helper ──────────────────────────────────────────────
-  async function startDownload({ mode, link, query1, query2, quality, downloadPlaylist, statusEl, buttonEl }) {
+  // ── Shared download helper ─────────────────────────────────────
+  async function startDownload({
+    mode, link, query1, query2, quality, audioKbps, videoMaxMbps,
+    downloadPlaylist, statusEl, buttonEl,
+  }) {
     if (!link && !query1 && !query2) {
       alert('Please provide at least a URL or search terms.');
       return;
@@ -58,7 +89,9 @@
       const res = await fetch('/api/download', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode, link, query1, query2, quality, downloadPlaylist }),
+        body: JSON.stringify({
+          mode, link, query1, query2, quality, audioKbps, videoMaxMbps, downloadPlaylist,
+        }),
       });
 
       if (!res.ok) {
@@ -92,20 +125,21 @@
     }
   }
 
-  // ── Music tab wiring ─────────────────────────────────────────────────────
+  // ── Music tab wiring ─────────────────────────────────────────
   document.getElementById('m-download').addEventListener('click', () => {
     startDownload({
       mode: 'music',
       link: document.getElementById('m-link').value.trim(),
       query1: document.getElementById('m-artist').value.trim(),
       query2: document.getElementById('m-song').value.trim(),
+      audioKbps: getAudioKbps(),
       downloadPlaylist: document.getElementById('m-playlist').checked,
       statusEl: document.getElementById('m-status'),
       buttonEl: document.getElementById('m-download'),
     });
   });
 
-  // ── Video tab wiring ─────────────────────────────────────────────────────
+  // ── Video tab wiring ─────────────────────────────────────────
   document.getElementById('v-download').addEventListener('click', () => {
     startDownload({
       mode: 'video',
@@ -113,6 +147,7 @@
       query1: document.getElementById('v-creator').value.trim(),
       query2: document.getElementById('v-title').value.trim(),
       quality: selectedQuality,
+      videoMaxMbps: getVideoMaxMbps(),
       downloadPlaylist: document.getElementById('v-playlist').checked,
       statusEl: document.getElementById('v-status'),
       buttonEl: document.getElementById('v-download'),

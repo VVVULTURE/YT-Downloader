@@ -3,11 +3,14 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="theme-color" content="#FF0000" />
 <title>YT Downloader</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <div class="topbar">
+    <img class="brand-logo" src="favicon.svg" alt="" width="22" height="22" />
     <span class="brand">YT Downloader</span>
   </div>
 
@@ -27,6 +30,12 @@
 
       <label>Song Name</label>
       <input type="text" id="m-song" placeholder="Song Name" />
+
+      <label>Audio Bitrate (MP3)</label>
+      <div class="slider-row">
+        <input type="range" id="m-bitrate" min="0" max="4" step="1" value="4" />
+        <span class="slider-val" id="m-bitrate-val">320 kbps</span>
+      </div>
 
       <label class="checkbox-row">
         <input type="checkbox" id="m-playlist" />
@@ -52,6 +61,12 @@
       <div class="segmented" id="v-quality">
         <button class="seg-btn" data-value="best">Best</button>
         <button class="seg-btn active" data-value="1080p">1080p</button>
+      </div>
+
+      <label>Max Video Bitrate</label>
+      <div class="slider-row">
+        <input type="range" id="v-bitrate" min="0" max="7" step="1" value="7" />
+        <span class="slider-val" id="v-bitrate-val">Max</span>
       </div>
 
       <label class="checkbox-row">

@@ -29,6 +29,13 @@ body {
   padding: 14px 24px;
   background: #1a1b20;
   border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.brand-logo {
+  display: block;
 }
 
 .brand {
@@ -132,6 +139,26 @@ input[type="text"]:focus {
 .seg-btn.active {
   background: var(--accent);
   color: #fff;
+}
+
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.slider-row input[type="range"] {
+  flex: 1;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.slider-val {
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+  min-width: 84px;
+  text-align: right;
 }
 
 .status {
