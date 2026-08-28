@@ -124,4 +124,4 @@ folder in File Explorer. Your choice is remembered between runs.
 | MP3 download fails | ffmpeg is not on PATH — see setup above |
 | Wrong video found (Music) | Try including more of the official title, e.g. `Rolling in the Deep (Official Video)` |
 | Wrong video found (Video) | Add more distinctive words from the title |
-| "Download Error" popup, video usually works | The popup now shows the real yt-dlp error message under "Details" — this is almost always YouTube's extractor needing an update. Rebuild via `build_exe.bat`, which now force-upgrades yt-dlp before every build. |
+| "Download Error" popup / `HTTP Error 403: Forbidden` | Almost always YouTube's extractor needing an update. The app now **auto-updates yt-dlp** on its own: it keeps a fresh copy in `%LOCALAPPDATA%\YT-Downloader` and refreshes it from GitHub in the background (applied on next launch). If it just happened, close and reopen the app once. It also retries each download against several YouTube "player clients" before showing the error. As a last resort, rebuild via `build_exe.bat` (force-upgrades yt-dlp), or delete `%LOCALAPPDATA%\YT-Downloader` and relaunch to force a fresh download. |

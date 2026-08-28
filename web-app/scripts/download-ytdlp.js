@@ -45,12 +45,15 @@ function download(currentUrl, redirectsLeft) {
   try {
     fs.mkdirSync(binDir, { recursive: true });
 
+    // Always fetch the latest release. YouTube breaks old yt-dlp builds
+    // constantly (every download starts failing with "HTTP Error 403:
+    // Forbidden"), so a cached bin/yt-dlp from a previous deploy is not good
+    // enough. server.js additionally runs `yt-dlp -U` on boot and daily.
     if (fs.existsSync(dest)) {
-      console.log(`[download-ytdlp] yt-dlp already present at ${dest}, skipping download.`);
-      return;
+      console.log(`[download-ytdlp] Refreshing existing yt-dlp at ${dest} ...`);
+    } else {
+      console.log(`[download-ytdlp] Downloading yt-dlp from ${url} ...`);
     }
-
-    console.log(`[download-ytdlp] Downloading yt-dlp from ${url} ...`);
     await download(url, 5);
     if (!isWin) fs.chmodSync(dest, 0o755);
     console.log(`[download-ytdlp] yt-dlp ready at ${dest}`);

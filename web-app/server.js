@@ -121,6 +121,23 @@ function runYtDlp(args, options = {}) {
   });
 }
 
+// Keep yt-dlp current. YouTube breaks old builds within weeks (every download
+// starts 403ing), and a container/CDN can hand us a stale bin/yt-dlp from an
+// earlier deploy. `yt-dlp -U` replaces the binary in place with the latest
+// release. Runs on boot and once a day after that; failures are non-fatal.
+function selfUpdateYtDlp() {
+  if (!fs.existsSync(YTDLP_PATH)) return;
+  ensureExecutable(YTDLP_PATH);
+  execFile(YTDLP_PATH, ['-U'], { timeout: 120000 }, (err, stdout, stderr) => {
+    const out = `${stdout || ''}${stderr || ''}`.trim();
+    if (err) {
+      console.error(`[yt-dlp -U] update check failed (non-fatal): ${err.message}`);
+    } else if (out) {
+      console.log(`[yt-dlp -U] ${out.split('\n').pop()}`);
+    }
+  });
+}
+
 async function searchYouTube(query, limit) {
   const { stdout } = await runYtDlp([
     '--flat-playlist',
@@ -243,7 +260,30 @@ app.post('/api/download', async (req, res) => {
 
     args.push(url);
 
-    await runYtDlp(args);
+    // YouTube periodically 403s whichever player client yt-dlp picks by
+    // default. Retry with alternate clients before giving up; a genuinely
+    // private/removed video fails on all of them and still surfaces below.
+    const clientFallbacks = [null, 'tv', 'web_safari', 'ios', 'android', 'mweb'];
+    let lastErr = null;
+    let downloaded = false;
+    for (const client of clientFallbacks) {
+      const attemptArgs = client
+        ? ['--extractor-args', `youtube:player_client=${client}`, ...args]
+        : args;
+      try {
+        await runYtDlp(attemptArgs);
+        downloaded = true;
+        break;
+      } catch (e) {
+        lastErr = e;
+        const msg = `${e.stderr || e.message || ''}`.toLowerCase();
+        if (msg.includes('403') || msg.includes('forbidden') || msg.includes('player') || msg.includes('sign in')) {
+          continue;
+        }
+        throw e;
+      }
+    }
+    if (!downloaded) throw lastErr;
 
     const files = fs
       .readdirSync(workDir)
@@ -293,4 +333,6 @@ app.listen(PORT, () => {
   console.log(`YT Downloader web server listening on port ${PORT}`);
   console.log(`yt-dlp: ${YTDLP_PATH} (${fs.existsSync(YTDLP_PATH) ? 'present' : 'MISSING'})`);
   console.log(`ffmpeg: ${ffmpegPath} (${fs.existsSync(ffmpegPath) ? 'present' : 'MISSING'})`);
+  selfUpdateYtDlp();
+  setInterval(selfUpdateYtDlp, 24 * 60 * 60 * 1000).unref();
 });
