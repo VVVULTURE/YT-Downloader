@@ -1,15 +1,145 @@
-# File: downloader.py 
+# File: downloader.py
 import os
 import sys
 import json
 import threading
 import queue
+import time # Import time for better thread control/sleep simulation if needed
+import urllib.request
 from difflib import SequenceMatcher
 from tkinter import filedialog, messagebox
-import time # Import time for better thread control/sleep simulation if needed
 
 import customtkinter as ctk
-import yt_dlp
+
+
+# ── yt-dlp AUTO-UPDATER ──────────────────────────────────────────────────────
+# YouTube changes its internals constantly. A yt-dlp build that is only a few
+# weeks old commonly starts failing EVERY download with:
+#     ERROR: unable to download video data: HTTP Error 403: Forbidden
+# The compiled .exe bundles whatever yt-dlp was current on build day, so it
+# goes stale on its own. To stay working with no rebuild, we keep our own copy
+# of yt-dlp's official zipapp in %LOCALAPPDATA%\YT-Downloader and refresh it
+# from GitHub's "latest release". Whatever is in that cache is put on sys.path
+# *before* `import yt_dlp`, so it always wins over any stale bundled copy.
+
+_YTDLP_LATEST_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest"
+_YTDLP_ZIPAPP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
+_YTDLP_RECHECK_SECONDS = 6 * 3600  # ask GitHub for a newer release at most this often
+
+
+def _ytdlp_cache_dir():
+    base = os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
+    d = os.path.join(base, "YT-Downloader")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
+    return d
+
+
+_YTDLP_CACHE_DIR = _ytdlp_cache_dir()
+_YTDLP_ZIPAPP_PATH = os.path.join(_YTDLP_CACHE_DIR, "yt-dlp.pyz")
+_YTDLP_VERSION_PATH = os.path.join(_YTDLP_CACHE_DIR, "yt-dlp.version")
+_YTDLP_CHECK_PATH = os.path.join(_YTDLP_CACHE_DIR, "yt-dlp.lastcheck")
+
+
+def _read_text(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def _write_text(path, text):
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(str(text))
+    except Exception:
+        pass
+
+
+def _latest_ytdlp_tag(timeout=10):
+    """Latest yt-dlp version string, via the /releases/latest redirect target
+    (plain web request, so no GitHub API rate limiting). "" on any failure."""
+    try:
+        req = urllib.request.Request(
+            _YTDLP_LATEST_URL, headers={"User-Agent": "YT-Downloader"}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            final_url = resp.geturl()
+        if "/tag/" in final_url:
+            return final_url.rstrip("/").split("/tag/")[-1]
+    except Exception:
+        pass
+    return ""
+
+
+def _download_ytdlp_zipapp(timeout=60):
+    """Fetch the official yt-dlp zipapp to the cache, atomically."""
+    tmp = _YTDLP_ZIPAPP_PATH + ".tmp"
+    req = urllib.request.Request(
+        _YTDLP_ZIPAPP_URL, headers={"User-Agent": "YT-Downloader"}
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = resp.read()
+    if len(data) < 500_000 or data[:2] not in (b"PK", b"#!"):
+        raise RuntimeError("downloaded yt-dlp looks invalid")
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.replace(tmp, _YTDLP_ZIPAPP_PATH)
+
+
+def _refresh_ytdlp(force=False):
+    """Update the cached yt-dlp if it is missing or GitHub has a newer release.
+    Safe to call from a background thread. Returns True if a new copy landed."""
+    have = os.path.isfile(_YTDLP_ZIPAPP_PATH)
+    try:
+        last_check = float(_read_text(_YTDLP_CHECK_PATH) or 0)
+    except ValueError:
+        last_check = 0.0
+
+    if have and not force and (time.time() - last_check) < _YTDLP_RECHECK_SECONDS:
+        return False
+
+    latest = _latest_ytdlp_tag()
+    _write_text(_YTDLP_CHECK_PATH, time.time())
+    current = _read_text(_YTDLP_VERSION_PATH)
+
+    if have and latest and latest == current:
+        return False
+    if not have and not latest:
+        return False  # nothing cached and can't reach GitHub — nothing to do
+
+    try:
+        _download_ytdlp_zipapp()
+        _write_text(_YTDLP_VERSION_PATH, latest or current)
+        return True
+    except Exception:
+        return False
+
+
+def _bootstrap_ytdlp():
+    """Runs before `import yt_dlp`. Puts the cached zipapp on sys.path. Does a
+    one-off blocking download only on first run (nothing cached yet), so a
+    stale bundled yt-dlp can't 403 every single download."""
+    try:
+        if not os.path.isfile(_YTDLP_ZIPAPP_PATH):
+            try:
+                _download_ytdlp_zipapp(timeout=25)
+                _write_text(_YTDLP_CHECK_PATH, time.time())
+                _write_text(_YTDLP_VERSION_PATH, _latest_ytdlp_tag())
+            except Exception:
+                pass  # offline first run — fall back to the bundled copy
+        if os.path.isfile(_YTDLP_ZIPAPP_PATH):
+            sys.path.insert(0, _YTDLP_ZIPAPP_PATH)
+    except Exception:
+        pass
+
+
+_bootstrap_ytdlp()
+
+import yt_dlp  # noqa: E402  — must come after _bootstrap_ytdlp()
 
 
 # ── CONFIGURATION ────────────────────────────────-----------------------------
@@ -113,9 +243,25 @@ class App(ctk.CTk):
         self.progress_queue = queue.Queue()
 
         self.title("YT Downloader")
-        self.geometry("650x820") 
+        self.geometry("650x820")
         self._build()
         self._poll_updates()
+
+        # Keep yt-dlp current in the background so YouTube changes don't break
+        # downloads. A newer copy is picked up on the next launch.
+        threading.Thread(target=self._background_ytdlp_refresh, daemon=True).start()
+
+
+    def _background_ytdlp_refresh(self):
+        try:
+            if _refresh_ytdlp():
+                self._send_progress(
+                    None,
+                    "Downloader core updated — restart the app to apply.",
+                    "#9aa0a6",
+                )
+        except Exception:
+            pass
 
 
     def _poll_updates(self):
@@ -125,9 +271,9 @@ class App(ctk.CTk):
                 widget, text, color = message["data"]
 
                 # Defensive check against None widget (Fix applied here)
-                if widget is None: 
-                    continue 
-                
+                if widget is None:
+                    continue
+
                 try:
                     if isinstance(widget, ctk.CTkProgressBar):
                         widget.set(message["pct"])
@@ -270,7 +416,7 @@ class App(ctk.CTk):
                 dl_opts = {
                     "format": "bestaudio/best",
                     "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "320"}],
-                    "outtmpl": os.path.join(folder, "%(title)s-%(id)s.%(ext)s"), 
+                    "outtmpl": os.path.join(folder, "%(title)s-%(id)s.%(ext)s"),
                     "quiet": True,
                     "noplaylist": not download_playlist,
                 }
@@ -289,13 +435,36 @@ class App(ctk.CTk):
                 dl_opts["ffmpeg_location"] = FFMPEG_LOCATION
 
             # Add the progress hook to pass real-time status updates
-            dl_opts['progress_hooks'] = [progress_hook] 
-            
-            with yt_dlp.YoutubeDL(dl_opts) as ydl:
-                ydl.download([url])
-                # Everything for this request (single item or full list) is done.
-                self._send_progress(label, "Finished", "#2ecc71", 1.0)
-                return folder
+            dl_opts['progress_hooks'] = [progress_hook]
+            dl_opts.setdefault("retries", 5)
+            dl_opts.setdefault("fragment_retries", 10)
+
+            # YouTube periodically 403s whichever "player client" yt-dlp picks
+            # by default. If that happens, retry the same download forcing a
+            # different client before giving up. yt-dlp's own current default
+            # order is tried first (client=None).
+            client_fallbacks = [None, ["tv"], ["web_safari"], ["ios"], ["android"], ["mweb"]]
+            last_err = None
+            for client in client_fallbacks:
+                opts = dict(dl_opts)
+                if client:
+                    opts["extractor_args"] = {"youtube": {"player_client": client}}
+                try:
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        ydl.download([url])
+                    self._send_progress(label, "Finished", "#2ecc71", 1.0)
+                    return folder
+                except yt_dlp.DownloadError as e:
+                    last_err = e
+                    msg = str(e).lower()
+                    # Only a forbidden / client-ish failure is worth retrying
+                    # with another client. A genuinely private/removed video
+                    # fails the same way on every client, so we still surface
+                    # it after the loop.
+                    if "403" in msg or "forbidden" in msg or "player" in msg or "sign in" in msg:
+                        continue
+                    raise
+            raise last_err
 
         except yt_dlp.DownloadError as e:
             error_text = str(e)
@@ -319,7 +488,7 @@ class App(ctk.CTk):
 
     def _build_music(self):
         tab = self.tabs.tab("MUSIC")
-        
+
         ctk.CTkLabel(tab, text="YouTube URL / Search Term:").pack(pady=(5, 0))
         self.m_link = ctk.CTkEntry(tab, placeholder_text="Paste YouTube Video URL or 'Artist Song Title'")
         self.m_link.pack(fill='x', padx=20)
@@ -327,7 +496,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(tab, text="Artist Name:").pack(pady=(10, 0))
         self.m_artist = ctk.CTkEntry(tab, placeholder_text="Artist")
         self.m_artist.pack(fill='x', padx=20)
-        
+
         ctk.CTkLabel(tab, text="Song Name:").pack(pady=(5, 0))
         self.m_song = ctk.CTkEntry(tab, placeholder_text="Song Name")
         self.m_song.pack(fill='x', padx=20)
@@ -394,7 +563,7 @@ class App(ctk.CTk):
         if not link and not artist and not song:
             messagebox.showerror("Error", "Please provide at least a URL or search terms.")
             return
-        
+
         def worker():
             try:
                 # 1. Link Download (Direct download attempt) - Highest Priority
@@ -412,13 +581,13 @@ class App(ctk.CTk):
 
                 # --- Search Phase (Metadata Extraction) ---
                 self._send_progress(self.m_lbl, "Searching YouTube...", "#ffcc00", 0)
-                
+
                 with yt_dlp.YoutubeDL({"quiet": True, "extract_flat": True}) as ydl:
                     query = ""
                     if artist and song:
                         query = f"{artist} {song}"
                     elif artist:
-                         query = f"'{artist}' official music video" 
+                         query = f"'{artist}' official music video"
                     else:
                          query = f"'{song}' song official"
 
@@ -435,7 +604,7 @@ class App(ctk.CTk):
 
                 mode = "music" if self.m_fmt.get() == "MP3" else "video"
                 url = f"https://www.youtube.com/watch?v={best_entry['id']}"
-                
+
                 # --- Download Phase ---
                 return self._perform_download(url, mode, download_playlist=self.m_playlist_var.get(), label=self.m_lbl)
 
@@ -457,7 +626,7 @@ class App(ctk.CTk):
         if not link and not creator and not title:
             messagebox.showerror("Error", "Please provide at least a URL or search terms.")
             return
-        
+
         def worker():
             try:
                 # 1. Link Download (Direct download attempt) - Highest Priority
@@ -496,7 +665,7 @@ class App(ctk.CTk):
 
                 mode = "video"
                 url = f"https://www.youtube.com/watch?v={best_entry['id']}"
-                
+
                 # --- Download Phase ---
                 return self._perform_download(url, mode, download_playlist=self.v_playlist_var.get(), label=self.v_lbl)
 
