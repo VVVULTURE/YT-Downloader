@@ -131,12 +131,50 @@ an external uptime monitor.
 
 ---
 
+## YouTube bot check ("Sign in to confirm you're not a bot")
+
+YouTube shows this for requests coming from a **datacenter IP** — which is
+every host (Render, Fly, a VPS, CI). It's not a bug and there's no flag that
+turns it off; the same download works fine from your laptop's home
+connection. The reliable fix is to give yt-dlp a **cookies file** from a
+logged-in YouTube account.
+
+> **Use a throwaway Google account, not your main one.** yt-dlp's own docs
+> warn the account can get rate-limited or banned when used this way.
+
+### 1. Export `cookies.txt`
+
+Do it from a **private / incognito window** so the session doesn't rotate:
+
+1. Open a private window, sign in to YouTube (throwaway account).
+2. In that same tab, go to `https://www.youtube.com/robots.txt`.
+3. With a "cookies.txt" browser extension (e.g. *Get cookies.txt LOCALLY*),
+   export cookies for **youtube.com** → save as `cookies.txt` (Netscape
+   format).
+4. **Close the private window** — don't reopen that session.
+
+Re-export every few weeks; if downloads start failing again with the bot
+message, the cookies have expired.
+
+### 2. Give it to the app
+
+- **Local**: drop `cookies.txt` in the `web-app/` folder (it's gitignored).
+- **Render**: service → **Environment** → **Secret Files** → **Add Secret
+  File**, filename `cookies.txt`, paste the contents. Render mounts it at
+  `/etc/secrets/cookies.txt`, which the app checks automatically. Redeploy.
+- **Custom path**: set the `COOKIES_FILE` env var to wherever the file is.
+
+`GET /api/health` reports `cookiesLoaded` so you can confirm it was picked
+up. **Never commit `cookies.txt`** — it's account credentials.
+
+---
+
 ## API
 
 - `GET /healthz` — returns `ok` (plain text). Used by the keep-alive ping
   and suitable for an uptime monitor / Render health check.
-- `GET /api/health` — reports whether yt-dlp and ffmpeg are present and
-  working.
+- `GET /api/health` — reports whether yt-dlp, ffmpeg and a cookies file are
+  present (`cookiesLoaded`).
 - `POST /api/download` — body:
   ```json
   {
