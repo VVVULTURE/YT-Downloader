@@ -4,8 +4,9 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const crypto = require('crypto');
 const { execFile } = require('child_process');
+// archiver is pinned to the v7 line: v8 went ESM-only and dropped this
+// factory-function API, which would need Node 20.19+ for require(ESM).
 const archiver = require('archiver');
 const ffmpegPath = require('ffmpeg-static');
 
@@ -79,6 +80,36 @@ function scoreVideo(entry, creator, titleQ) {
   const title = (entry.title || '').toLowerCase();
   score += Math.floor(similarity(titleQ, title) * 45);
   return score;
+}
+
+// ── Bitrate helpers (mirror the desktop app's Audio/Video bitrate sliders) ──
+const AUDIO_KBPS_CHOICES = [128, 160, 192, 256, 320];
+
+function clampAudioKbps(v) {
+  const n = Math.round(Number(v));
+  return AUDIO_KBPS_CHOICES.includes(n) ? n : 320; // 320 = the previous default
+}
+
+// Build the yt-dlp -f string for a video download.
+//   quality       : "best" (no height cap) or "1080p" (<=1080)
+//   videoMaxMbps  : cap on video bitrate in Mbit/s, or falsy for no cap ("Max")
+// Each clause falls back to the next so a video whose formats don't report a
+// bitrate (or that has nothing under the cap) still downloads.
+function buildVideoFormat(quality, videoMaxMbps) {
+  const h = quality === 'best' ? '' : '[height<=1080]';
+  const mbps = Number(videoMaxMbps);
+  const clauses = [];
+  if (mbps > 0) {
+    const cap = Math.round(mbps * 1000); // yt-dlp vbr/tbr filters are in KBit/s
+    clauses.push(`bestvideo${h}[vbr<=${cap}]+bestaudio`);
+    clauses.push(`bestvideo${h}[tbr<=${cap}]+bestaudio`);
+    clauses.push(`best${h}[tbr<=${cap}]`);
+  }
+  clauses.push(`bestvideo${h}+bestaudio`);
+  clauses.push(`best${h}`);
+  clauses.push('bestvideo+bestaudio');
+  clauses.push('best'); // absolute last resort
+  return [...new Set(clauses)].join('/');
 }
 
 // ── yt-dlp process helpers ───────────────────────────────────────────────
@@ -180,6 +211,8 @@ app.get('/api/health', async (req, res) => {
  *   query1: string,          // artist (music) or creator (video)
  *   query2: string,          // song (music) or title (video)
  *   quality: "best" | "1080p" (video only),
+ *   audioKbps: 128|160|192|256|320   (music only, default 320),
+ *   videoMaxMbps: number | null      (video only, cap in Mbit/s; null = no cap),
  *   downloadPlaylist: boolean
  * }
  *
@@ -193,6 +226,8 @@ app.post('/api/download', async (req, res) => {
     query1 = '',
     query2 = '',
     quality = '1080p',
+    audioKbps = 320,
+    videoMaxMbps = null,
     downloadPlaylist = false,
   } = req.body || {};
 
@@ -237,7 +272,13 @@ app.post('/api/download', async (req, res) => {
     }
 
     const outTemplate = path.join(workDir, '%(title)s-%(id)s.%(ext)s');
-    const args = ['--no-warnings', '--ffmpeg-location', ffmpegPath, '-o', outTemplate];
+    const args = [
+      '--no-warnings',
+      '--ffmpeg-location', ffmpegPath,
+      '--retries', '5',
+      '--fragment-retries', '10',
+      '-o', outTemplate,
+    ];
 
     if (!downloadPlaylist) {
       args.push('--no-playlist');
@@ -248,12 +289,11 @@ app.post('/api/download', async (req, res) => {
         '-f', 'bestaudio/best',
         '--extract-audio',
         '--audio-format', 'mp3',
-        '--audio-quality', '320K'
+        '--audio-quality', `${clampAudioKbps(audioKbps)}K`
       );
     } else {
       args.push(
-        '-f',
-        quality === 'best' ? 'bestvideo+bestaudio/best' : 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
+        '-f', buildVideoFormat(quality, videoMaxMbps),
         '--merge-output-format', 'mp4'
       );
     }
@@ -305,15 +345,21 @@ app.post('/api/download', async (req, res) => {
       });
     } else {
       const zipName = `${mode === 'music' ? 'music' : 'video'}-playlist-${Date.now()}.zip`;
-      res.setHeader('Content-Type', 'application/zip');
-      res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`);
-
       const archive = archiver('zip', { zlib: { level: 9 } });
+
       archive.on('error', (err) => {
         console.error('Archive error:', err);
-        res.status(500).end();
+        cleanup();
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'Failed to build the playlist zip.', details: String(err) });
+        } else {
+          res.destroy(err);
+        }
       });
       archive.on('end', cleanup);
+
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`);
       archive.pipe(res);
       for (const f of files) archive.file(f, { name: path.basename(f) });
       archive.finalize();
@@ -322,10 +368,14 @@ app.post('/api/download', async (req, res) => {
     fs.rm(workDir, { recursive: true, force: true }, () => {});
     const details = err.stderr || err.message || String(err);
     console.error('Download error:', details);
-    res.status(500).json({
-      error: 'The video or music appears to be unavailable, private, or does not exist.',
-      details,
-    });
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: 'The video or music appears to be unavailable, private, or does not exist.',
+        details,
+      });
+    } else {
+      res.destroy(err);
+    }
   }
 });
 
