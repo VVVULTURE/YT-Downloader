@@ -1,0 +1,23 @@
+# Render Blueprint for the web app that lives in web-app/.
+#
+# Deploy it with Render -> New -> Blueprint and pick this repo; Render reads
+# this file from the repo root and builds the `rootDir` (web-app/) subfolder.
+# Or set the same values by hand in a normal Web Service — see
+# web-app/README.md.
+services:
+  - type: web
+    name: yt-downloader-web
+    runtime: node
+    rootDir: web-app
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      # RENDER_EXTERNAL_URL is injected by Render automatically and is what
+      # the keep-alive self-ping uses. KEEPALIVE_MINUTES is optional
+      # (default 13; Render free instances sleep after ~15 min idle).
+      - key: KEEPALIVE_MINUTES
+        value: "13"

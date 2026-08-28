@@ -112,7 +112,7 @@ function buildVideoFormat(quality, videoMaxMbps) {
   return [...new Set(clauses)].join('/');
 }
 
-// ── yt-dlp process helpers ───────────────────────────────────────────────
+// ── yt-dlp process helpers ────────────────────────────────────────
 function ensureExecutable(filePath) {
   // Some serverless platforms (notably Vercel) can strip the executable bit
   // off bundled binaries when packaging a function. This is a harmless
@@ -180,7 +180,34 @@ async function searchYouTube(query, limit) {
   return data.entries || [];
 }
 
-// ── API routes ───────────────────────────────────────────────────────────
+// ── Keep-alive self-ping ───────────────────────────────────────
+// Render's free tier spins a web service down after ~15 min with no inbound
+// traffic (the next visitor then waits ~30-60s for a cold start). Pinging our
+// own public URL on a timer keeps it warm. Render sets RENDER_EXTERNAL_URL
+// automatically; on other hosts set KEEPALIVE_URL yourself. With neither set
+// (local dev) the self-ping is simply disabled.
+const KEEPALIVE_URL = (process.env.KEEPALIVE_URL || process.env.RENDER_EXTERNAL_URL || '')
+  .trim()
+  .replace(/\/+$/, '');
+const KEEPALIVE_MINUTES = Math.max(1, Number(process.env.KEEPALIVE_MINUTES) || 13);
+
+function keepAlivePing() {
+  const target = `${KEEPALIVE_URL}/healthz`;
+  fetch(target, {
+    headers: { 'User-Agent': 'yt-downloader-keepalive' },
+    signal: AbortSignal.timeout(30000),
+  })
+    .then((r) => {
+      if (!r.ok) console.error(`[keep-alive] ${target} -> HTTP ${r.status}`);
+    })
+    .catch((e) => console.error(`[keep-alive] ${target} failed: ${e.message || e}`));
+}
+
+// ── API routes ───────────────────────────────────────────────────
+
+// Ultra-light endpoint for the keep-alive ping (and any external uptime
+// monitor). `/api/health` is the richer diagnostic one.
+app.get('/healthz', (req, res) => res.type('text/plain').send('ok'));
 
 app.get('/api/health', async (req, res) => {
   const ytdlpExists = fs.existsSync(YTDLP_PATH);
@@ -383,6 +410,14 @@ app.listen(PORT, () => {
   console.log(`YT Downloader web server listening on port ${PORT}`);
   console.log(`yt-dlp: ${YTDLP_PATH} (${fs.existsSync(YTDLP_PATH) ? 'present' : 'MISSING'})`);
   console.log(`ffmpeg: ${ffmpegPath} (${fs.existsSync(ffmpegPath) ? 'present' : 'MISSING'})`);
+
   selfUpdateYtDlp();
   setInterval(selfUpdateYtDlp, 24 * 60 * 60 * 1000).unref();
+
+  if (KEEPALIVE_URL) {
+    console.log(`keep-alive: pinging ${KEEPALIVE_URL}/healthz every ${KEEPALIVE_MINUTES} min`);
+    setInterval(keepAlivePing, KEEPALIVE_MINUTES * 60 * 1000).unref();
+  } else {
+    console.log('keep-alive: disabled (set RENDER_EXTERNAL_URL or KEEPALIVE_URL to enable)');
+  }
 });
