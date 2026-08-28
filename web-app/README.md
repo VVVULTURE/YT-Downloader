@@ -54,17 +54,40 @@ Then open **http://localhost:3000**.
 
 ## Deploying
 
-### Render / Koyeb (recommended)
+### Render (recommended)
 
-Both support long-running Node servers with no strict request-time limit,
-which matters for anything beyond a very short clip.
+This repo is a monorepo — the web app is the `web-app/` subfolder — so the
+key setting is telling Render to build **from that folder**.
 
-- **Render**: push this repo, create a new **Web Service**, point it at the
-  `web-app/` folder (or use the included `render.yaml` via Render's Blueprint
-  deploy). Build command `npm install`, start command `node server.js`.
-- **Koyeb**: create a new app from this repo (or the included `Dockerfile`),
-  set the working directory / Dockerfile path to `web-app/`. Koyeb will pick
-  up `PORT` automatically.
+**Option A — manual Web Service (most control):**
+
+1. **New +** → **Web Service** → connect this GitHub repo.
+2. **Root Directory**: `web-app`  ← this is the important one.
+3. **Runtime**: `Node`
+4. **Build Command**: `npm install`
+5. **Start Command**: `node server.js`
+6. **Instance Type**: `Free` is fine (see keep-alive below).
+7. **Health Check Path** (Advanced): `/healthz`
+8. **Environment Variables** (Advanced) — all optional:
+   - `NODE_VERSION` = `20`
+   - `KEEPALIVE_MINUTES` = `13` (only if you want to change the default)
+
+   You do **not** need to set a keep-alive URL — Render injects
+   `RENDER_EXTERNAL_URL` automatically and the server uses it.
+9. **Create Web Service**. First build takes a few minutes (it downloads
+   yt-dlp and a static ffmpeg). When it's live, open the `.onrender.com` URL.
+
+Every push to the repo's default branch redeploys automatically.
+
+**Option B — Blueprint (one click):** **New +** → **Blueprint** → pick this
+repo. Render reads the root **`render.yaml`**, which already sets
+`rootDir: web-app` and the values above.
+
+### Koyeb
+
+Create a new app from this repo (or the included `Dockerfile`), set the
+working directory / Dockerfile path to `web-app/`. Koyeb picks up `PORT`
+automatically.
 
 ### Vercel
 
@@ -89,8 +112,29 @@ docker run -p 3000:3000 yt-downloader-web
 
 ---
 
+## Keep-alive (free-tier spin-down)
+
+Render's free instances go to sleep after ~15 minutes with no inbound
+traffic, and the next visitor then waits ~30–60s for a cold start. To avoid
+that, `server.js` pings its own public URL every **13 minutes** (just enough
+to count as traffic).
+
+- On **Render** it works with zero setup — `RENDER_EXTERNAL_URL` is provided
+  automatically.
+- **Anywhere else**, set `KEEPALIVE_URL` to the app's public base URL
+  (e.g. `https://my-app.example.com`).
+- `KEEPALIVE_MINUTES` overrides the interval; with no URL known (local dev)
+  the self-ping is disabled and the startup log says so.
+
+The ping hits `GET /healthz` (returns `ok`), which is also a good target for
+an external uptime monitor.
+
+---
+
 ## API
 
+- `GET /healthz` — returns `ok` (plain text). Used by the keep-alive ping
+  and suitable for an uptime monitor / Render health check.
 - `GET /api/health` — reports whether yt-dlp and ffmpeg are present and
   working.
 - `POST /api/download` — body:
