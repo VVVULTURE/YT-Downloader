@@ -6,6 +6,7 @@ import threading
 import queue
 import time # Import time for better thread control/sleep simulation if needed
 import urllib.request
+import importlib.machinery
 from difflib import SequenceMatcher
 from tkinter import filedialog, messagebox
 
@@ -19,8 +20,9 @@ import customtkinter as ctk
 # The compiled .exe bundles whatever yt-dlp was current on build day, so it
 # goes stale on its own. To stay working with no rebuild, we keep our own copy
 # of yt-dlp's official zipapp in %LOCALAPPDATA%\YT-Downloader and refresh it
-# from GitHub's "latest release". Whatever is in that cache is put on sys.path
-# *before* `import yt_dlp`, so it always wins over any stale bundled copy.
+# from GitHub's "latest release". That cached copy is wired into the import
+# system *before* `import yt_dlp` below, so it always wins over any stale
+# bundled copy (in the .exe) or older pip install (from source).
 
 _YTDLP_LATEST_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest"
 _YTDLP_ZIPAPP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
@@ -119,10 +121,25 @@ def _refresh_ytdlp(force=False):
         return False
 
 
+class _YtdlpFromZipapp:
+    """Meta-path finder that makes `import yt_dlp` resolve to our downloaded
+    zipapp. Needed because in the PyInstaller build, PyInstaller's own frozen
+    importer sits ahead of sys.path and would otherwise always return the
+    stale bundled yt_dlp regardless of what we prepend to sys.path."""
+
+    def __init__(self, zip_path):
+        self._paths = [zip_path]
+
+    def find_spec(self, name, path=None, target=None):
+        if name == "yt_dlp":
+            return importlib.machinery.PathFinder.find_spec("yt_dlp", self._paths, target)
+        return None
+
+
 def _bootstrap_ytdlp():
-    """Runs before `import yt_dlp`. Puts the cached zipapp on sys.path. Does a
-    one-off blocking download only on first run (nothing cached yet), so a
-    stale bundled yt-dlp can't 403 every single download."""
+    """Runs before `import yt_dlp`. Points the import system at the cached
+    zipapp. Does a one-off blocking download only on first run (nothing cached
+    yet), so a stale bundled yt-dlp can't 403 every single download."""
     try:
         if not os.path.isfile(_YTDLP_ZIPAPP_PATH):
             try:
@@ -132,6 +149,7 @@ def _bootstrap_ytdlp():
             except Exception:
                 pass  # offline first run — fall back to the bundled copy
         if os.path.isfile(_YTDLP_ZIPAPP_PATH):
+            sys.meta_path.insert(0, _YtdlpFromZipapp(_YTDLP_ZIPAPP_PATH))
             sys.path.insert(0, _YTDLP_ZIPAPP_PATH)
     except Exception:
         pass
