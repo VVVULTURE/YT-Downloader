@@ -1,0 +1,9 @@
+# Batch files must be CRLF or cmd.exe mis-parses multi-line blocks and ^ line
+# continuations (produces "else was unexpected at this time" / "'X' is not
+# recognized as an internal or external command").
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Keep shell scripts LF.
+*.sh text eol=lf

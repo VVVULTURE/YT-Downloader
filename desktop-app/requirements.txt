@@ -1,2 +1,5 @@
 customtkinter>=5.2.2
-yt-dlp>=2024.1.1
+# Floor only. YouTube breaks old yt-dlp constantly, so the app also
+# self-updates yt-dlp at runtime (see the AUTO-UPDATER block in downloader.py)
+# and build_exe.bat force-upgrades it on every build.
+yt-dlp>=2026.8.19
