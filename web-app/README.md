@@ -14,9 +14,15 @@ merging.
 ## Features
 
 - **Music tab** — paste a link, or search by artist + song. Downloads as
-  320kbps MP3.
+  MP3 with an **Audio Bitrate** slider (128 / 160 / 192 / 256 / 320 kbps;
+  default 320).
 - **Video tab** — paste a link, or search by creator + title. Choose
-  **Best** or **1080p** quality. Downloads as MP4.
+  **Best** or **1080p**, and set a **Max Video Bitrate** cap (≤ 2 … 20 Mbps,
+  or **Max** for no limit — the default). Downloads as MP4.
+- Stays working as YouTube changes — `yt-dlp -U` runs on boot and once a
+  day, `npm install` always pulls the latest yt-dlp release into `bin/`, and
+  each download retries against several YouTube "player clients" if the
+  first hits `HTTP Error 403: Forbidden`.
 - **"If Video has list, Download everything"** checkbox on both tabs —
   unchecked (default) downloads only the single requested item even if the
   link is part of a playlist or YouTube "radio mix"; checked downloads the
@@ -95,6 +101,8 @@ docker run -p 3000:3000 yt-downloader-web
     "query1": "Artist or Creator",
     "query2": "Song or Title",
     "quality": "1080p",        // video only: "best" or "1080p"
+    "audioKbps": 320,          // music only: 128|160|192|256|320 (default 320)
+    "videoMaxMbps": null,      // video only: bitrate cap in Mbit/s, null = no cap
     "downloadPlaylist": false
   }
   ```
