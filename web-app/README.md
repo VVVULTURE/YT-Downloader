@@ -5,9 +5,12 @@ A browser-based port of the desktop YT Downloader app. Paste a YouTube link
 MP3 or MP4 straight from your browser. No install required for end users —
 just visit the deployed site.
 
-Built with Node.js + Express, using [yt-dlp](https://github.com/yt-dlp/yt-dlp)
-for extraction and a bundled static `ffmpeg` for audio extraction / video
-merging.
+Built with Node.js + Express. The **server** is a thin [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+fetch proxy — it resolves the URL, gets past YouTube's player API, and streams
+the raw media track(s). The **browser** does the heavy lifting: MP3 transcoding
+with [ffmpeg.wasm](https://ffmpegwasm.netlify.app/) and playlist `.zip`
+assembly with [JSZip](https://stuk.github.io/jszip/). See
+[Where the work runs](#where-the-work-runs) below.
 
 ---
 
@@ -30,9 +33,43 @@ merging.
 - **"If Video has list, Download everything"** checkbox on both tabs —
   unchecked (default) downloads only the single requested item even if the
   link is part of a playlist or YouTube "radio mix"; checked downloads the
-  whole playlist as a `.zip`.
+  whole playlist as a `.zip` (assembled in your browser).
 - No server-side storage — each request downloads into a temp folder,
   streams the result straight to your browser, then cleans up.
+
+---
+
+## Where the work runs
+
+To keep the (free-tier) server light, only the parts that *need* yt-dlp run
+server-side; everything else runs in your browser.
+
+| Task | Runs on | Notes |
+|---|---|---|
+| Resolve URL / search, get past YouTube's player API, pick the `-f` format string, client-rotation retries | **server** | needs yt-dlp; microseconds of CPU |
+| Download the raw media track(s) | **server** | streamed straight through, nothing stored |
+| Mux video-only + audio-only → MP4 | **server** | just a `-c copy` remux, nearly free |
+| **Transcode audio → MP3** at the chosen bitrate | **browser** | multi-threaded `ffmpeg.wasm`; the heaviest job, and the reason it moved |
+| **Assemble a playlist into one `.zip`** | **browser** | JSZip, from a single multi-file response |
+
+**In-browser MP3 needs the page to be cross-origin isolated.** `server.js`
+sends `Cross-Origin-Opener-Policy: same-origin` +
+`Cross-Origin-Embedder-Policy: require-corp` for that (safe — the app loads
+zero third-party resources). If a browser ends up not isolated, or the
+`ffmpeg.wasm` core (~33 MB, cached after first load) fails to load, the app
+silently falls back to asking the **server** to transcode. `GET /api/health`
+reports `crossOriginIsolationHeaders` and `ffmpegWasmStaged`; the footer line
+shows `MP3: in-browser` or `MP3: server`.
+
+**Browser-memory ceiling:** the whole download is held in RAM to process it
+(~2 GB cap per tab). Fine for audio and single 1080p videos; a very long 4K
+video or a large playlist can run a phone out of memory — use the desktop
+site or smaller picks for those.
+
+`npm install` stages `ffmpeg.wasm` + JSZip (~35 MB, mostly the wasm core)
+into `public/vendor/` via `scripts/setup-wasm.js`. That folder is
+git-ignored and rebuilt on every install; if staging fails the server still
+boots and just uses the server-side fallback.
 
 ---
 
@@ -199,26 +236,40 @@ account is still the most reliable fix.
 - `GET /healthz` — returns `ok` (plain text). Used by the keep-alive ping
   and suitable for an uptime monitor / Render health check.
 - `GET /api/health` — reports whether yt-dlp, ffmpeg and a cookies file are
-  present (`cookiesLoaded`), and the JS runtime path. Add `?probe=1` to also
-  run a real extraction test and report the working player client + heights
-  (or the blocking error) as `extraction`.
+  present (`cookiesLoaded`), the JS runtime path, `crossOriginIsolationHeaders`,
+  and `ffmpegWasmStaged`. Add `?probe=1` to also run a real extraction test and
+  report the working player client + heights (or the blocking error) as
+  `extraction`.
 - `POST /api/download` — body:
   ```json
   {
-    "mode": "music",           // or "video"
-    "link": "https://...",     // optional if query1/query2 given
+    "mode": "music",            // or "video"
+    "link": "https://...",      // optional if query1/query2 given
     "query1": "Artist or Creator",
     "query2": "Song or Title",
-    "resolution": "1080",      // video only: "best"|"2160"|"1440"|"1080"|"720"|"480"|"360" (default "1080")
-    "audioKbps": 320,          // music only: 128|160|192|256|320 (default 320)
-    "videoMaxMbps": null,      // video only: bitrate cap in Mbit/s, null = no cap
-    "downloadPlaylist": false
+    "resolution": "1080",       // video only: "best"|"2160"|"1440"|"1080"|"720"|"480"|"360" (default "1080")
+    "audioKbps": 320,           // music only: 128|160|192|256|320 (default 320)
+    "videoMaxMbps": null,       // video only: bitrate cap in Mbit/s, null = no cap
+    "downloadPlaylist": false,
+    "assembleClient": false,    // browser will assemble multi-file responses (JSZip)
+    "transcodeClient": false    // browser will transcode audio -> MP3 (ffmpeg.wasm)
   }
   ```
-  Returns the media file directly (or a `.zip` if a playlist was requested
-  and multiple files were downloaded), or a JSON `{ error, details }` on
-  failure. A `409` with `{ error }` means the requested resolution isn't
-  available for that video — pick a different one.
+  On success the response carries an **`X-Ytdl-Kind`** header telling the
+  client what the body is:
+  - `media` — a finished file, save as-is (`Content-Disposition` names it).
+  - `audio` — one raw audio track; transcode to MP3 at `X-Ytdl-Bitrate`, save
+    as `${X-Ytdl-Name}.mp3`.
+  - `media-multi` / `audio-multi` — a length-prefixed multi-file stream
+    (`uint16BE nameLen │ name │ uint64BE dataLen │ data`, repeated,
+    `X-Ytdl-Count` files); zip them (transcoding each first for `audio-multi`).
+
+  With both extra flags absent/false the server does all of that itself and
+  always returns `media` (a file, or a server-built `.zip`) — so old clients
+  still work.
+
+  Errors are JSON `{ error, details }`. A `409 { error }` means the requested
+  resolution isn't available for that video — pick a different one.
 
 ---
 

@@ -88,6 +88,11 @@
     <span id="health-line">Checking server status…</span>
   </footer>
 
-  <script src="app.js"></script>
+  <!-- In-browser post-processing: JSZip (playlist .zip) + ffmpeg.wasm (MP3
+       transcode). Staged into public/vendor/ by scripts/setup-wasm.js. If
+       they're missing, app.js falls back to asking the server to do it. -->
+  <script src="/vendor/jszip.min.js" defer></script>
+  <script src="/vendor/ffmpeg/ffmpeg.js" defer></script>
+  <script src="app.js" defer></script>
 </body>
 </html>
