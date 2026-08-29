@@ -5,6 +5,10 @@ bin/
 .vercel/
 .DS_Store
 
+# Browser libraries (ffmpeg.wasm, JSZip) staged from node_modules by
+# scripts/setup-wasm.js on every `npm install`.
+public/vendor/
+
 # YouTube cookies — these are account credentials, never commit them.
 cookies.txt
 
