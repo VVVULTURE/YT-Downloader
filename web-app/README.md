@@ -173,12 +173,35 @@ up. **Never commit `cookies.txt`** — it's account credentials.
 
 ---
 
+## "Requested format is not available" on a server
+
+Different from the bot check. This means YouTube let the request through
+but is refusing to hand this server real video formats for that video
+(SABR streaming / a missing PO token — worse from datacenter IPs).
+
+The server already mitigates this: it needs a **JavaScript runtime** to
+solve YouTube's player challenges and uses the Node binary it's already
+running (`--js-runtimes node`); it asks for PO-token-gated formats anyway
+(`formats=missing_pot`, often still downloadable); and it rotates through
+`tv_simply` / `mweb` / mobile clients that don't need a PO token.
+
+To see exactly how far YouTube lets your deployment get, hit
+**`GET /api/health?probe=1`** — it runs a real extraction against a known
+public video and reports which player client worked and what heights it
+saw, or the blocking error. If that shows `extraction.ok: false`,
+add/refresh `cookies.txt` (above); a fresh cookies file from a throwaway
+account is still the most reliable fix.
+
+---
+
 ## API
 
 - `GET /healthz` — returns `ok` (plain text). Used by the keep-alive ping
   and suitable for an uptime monitor / Render health check.
 - `GET /api/health` — reports whether yt-dlp, ffmpeg and a cookies file are
-  present (`cookiesLoaded`).
+  present (`cookiesLoaded`), and the JS runtime path. Add `?probe=1` to also
+  run a real extraction test and report the working player client + heights
+  (or the blocking error) as `extraction`.
 - `POST /api/download` — body:
   ```json
   {

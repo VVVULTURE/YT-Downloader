@@ -16,6 +16,22 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const PORT = process.env.PORT || 3000;
 
+// yt-dlp 2026+ needs a JavaScript runtime to solve YouTube's nsig / player
+// JS challenges. With none available, extraction degrades hard on a
+// datacenter IP — clients fall back to APIs that return no usable formats
+// ("Requested format is not available"). Point yt-dlp at the Node binary
+// already running this server. (yt-dlp just warns and carries on if it's
+// somehow not there.)
+const JS_RUNTIME_ARGS = ['--js-runtimes', `node:${process.execPath}`];
+
+// youtube extractor-args string for a given player-client set. `formats=
+// missing_pot` also surfaces formats that would need a PO token we don't
+// have — on a hosted IP those are often still downloadable and are the
+// difference between "works" and "Requested format is not available".
+function ytExtractorArgs(clients) {
+  return `youtube:player_client=${clients};formats=missing_pot`;
+}
+
 // Allow overriding where the yt-dlp binary lives (e.g. if you installed it
 // system-wide via `pip install yt-dlp` instead of using the bundled copy).
 const YTDLP_PATH =
@@ -150,8 +166,10 @@ function buildVideoFormat(resolution, videoMaxMbps) {
 const YT_CLIENT_ATTEMPTS = [
   'default',            // best quality when it works
   'default,-tv',        // tv_downgraded is currently broken with cookies
-  'default,web_embedded',
+  'tv_simply',          // no PO token needed; solves JS challenges via Node
+  'mweb',               // no PO token needed; often works from hosted IPs
   'web_safari,mweb',
+  'default,web_embedded',
   'ios',
   'android',
 ];
@@ -179,7 +197,8 @@ async function probeVideoHeights(url) {
         '--no-playlist',
         '--skip-download',
         '--ignore-no-formats-error',
-        '--extractor-args', `youtube:player_client=${clients}`,
+        ...JS_RUNTIME_ARGS,
+        '--extractor-args', ytExtractorArgs(clients),
         ...COOKIE_ARGS,
         url,
       ]);
@@ -213,7 +232,7 @@ async function probeVideoHeights(url) {
   return best;
 }
 
-// ── yt-dlp process helpers ────────────────────────────────────────
+// ── yt-dlp process helpers ───────────────────────────────────
 function ensureExecutable(filePath) {
   // Some serverless platforms (notably Vercel) can strip the executable bit
   // off bundled binaries when packaging a function. This is a harmless
@@ -282,7 +301,7 @@ async function searchYouTube(query, limit) {
   return data.entries || [];
 }
 
-// ── Keep-alive self-ping ───────────────────────────────────────
+// ── Keep-alive self-ping ────────────────────────────────────
 // Render's free tier spins a web service down after ~15 min with no inbound
 // traffic (the next visitor then waits ~30-60s for a cold start). Pinging our
 // own public URL on a timer keeps it warm. Render sets RENDER_EXTERNAL_URL
@@ -322,15 +341,35 @@ app.get('/api/health', async (req, res) => {
       ytdlpVersion = `error: ${e.message}`;
     }
   }
+
+  // `?probe=1` runs a real extraction against a known-good public video so
+  // you can see, from the deployed host, exactly how far YouTube lets this
+  // server get (which player clients work, what heights, or the blocking
+  // error). A bit slow — opt-in only.
+  let extraction;
+  if (ytdlpExists && (req.query.probe === '1' || req.query.probe === 'true')) {
+    const TEST_URL = 'https://www.youtube.com/watch?v=aqz-KE-bpKQ'; // Big Buck Bunny
+    try {
+      const probe = await probeVideoHeights(TEST_URL);
+      extraction = probe
+        ? { ok: true, client: probe.clients, heights: probe.heights }
+        : { ok: false, error: 'no player client returned any video format' };
+    } catch (e) {
+      extraction = { ok: false, error: `${e.stderr || e.message || e}`.split('\n')[0].slice(0, 300) };
+    }
+  }
+
   res.json({
     ok: true,
     ytdlpPath: YTDLP_PATH,
     ytdlpPresent: ytdlpExists,
     ytdlpVersion,
+    jsRuntime: process.execPath,
     ffmpegPath,
     ffmpegPresent: fs.existsSync(ffmpegPath),
     cookiesFile: COOKIES_FILE,
     cookiesLoaded: Boolean(COOKIES_FILE),
+    ...(extraction ? { extraction } : {}),
   });
 });
 
@@ -475,7 +514,11 @@ app.post('/api/download', async (req, res) => {
     let downloaded = false;
     for (const clients of downloadClients) {
       try {
-        await runYtDlp(['--extractor-args', `youtube:player_client=${clients}`, ...args]);
+        await runYtDlp([
+          ...JS_RUNTIME_ARGS,
+          '--extractor-args', ytExtractorArgs(clients),
+          ...args,
+        ]);
         downloaded = true;
         break;
       } catch (e) {
