@@ -16,9 +16,13 @@ merging.
 - **Music tab** — paste a link, or search by artist + song. Downloads as
   MP3 with an **Audio Bitrate** slider (128 / 160 / 192 / 256 / 320 kbps;
   default 320).
-- **Video tab** — paste a link, or search by creator + title. Choose
-  **Best** or **1080p**, and set a **Max Video Bitrate** cap (≤ 2 … 20 Mbps,
-  or **Max** for no limit — the default). Downloads as MP4.
+- **Video tab** — paste a link, or search by creator + title. Pick a
+  **Resolution** (Best / 2160p / 1440p / 1080p / 720p / 480p / 360p;
+  default 1080p) and set a **Max Video Bitrate** cap (≤ 2 … 20 Mbps, or
+  **Max** for no limit — the default). Downloads as MP4. The resolution is
+  a **ceiling**: a video whose highest quality is below your pick still
+  downloads at its best. If the pick is genuinely unavailable for a video,
+  the download stops and asks you to choose a different one.
 - Stays working as YouTube changes — `yt-dlp -U` runs on boot and once a
   day, `npm install` always pulls the latest yt-dlp release into `bin/`, and
   each download retries against several YouTube "player clients" if the
@@ -182,7 +186,7 @@ up. **Never commit `cookies.txt`** — it's account credentials.
     "link": "https://...",     // optional if query1/query2 given
     "query1": "Artist or Creator",
     "query2": "Song or Title",
-    "quality": "1080p",        // video only: "best" or "1080p"
+    "resolution": "1080",      // video only: "best"|"2160"|"1440"|"1080"|"720"|"480"|"360" (default "1080")
     "audioKbps": 320,          // music only: 128|160|192|256|320 (default 320)
     "videoMaxMbps": null,      // video only: bitrate cap in Mbit/s, null = no cap
     "downloadPlaylist": false
@@ -190,7 +194,8 @@ up. **Never commit `cookies.txt`** — it's account credentials.
   ```
   Returns the media file directly (or a `.zip` if a playlist was requested
   and multiple files were downloaded), or a JSON `{ error, details }` on
-  failure.
+  failure. A `409` with `{ error }` means the requested resolution isn't
+  available for that video — pick a different one.
 
 ---
 

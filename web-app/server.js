@@ -107,13 +107,24 @@ function clampAudioKbps(v) {
   return AUDIO_KBPS_CHOICES.includes(n) ? n : 320; // 320 = the previous default
 }
 
+const RESOLUTION_CHOICES = ['best', '2160', '1440', '1080', '720', '480', '360'];
+
+function normalizeResolution(v) {
+  const s = String(v || '').replace(/p$/i, '');
+  return RESOLUTION_CHOICES.includes(s) ? s : '1080';
+}
+
 // Build the yt-dlp -f string for a video download.
-//   quality       : "best" (no height cap) or "1080p" (<=1080)
-//   videoMaxMbps  : cap on video bitrate in Mbit/s, or falsy for no cap ("Max")
-// Each clause falls back to the next so a video whose formats don't report a
-// bitrate (or that has nothing under the cap) still downloads.
-function buildVideoFormat(quality, videoMaxMbps) {
-  const h = quality === 'best' ? '' : '[height<=1080]';
+//   resolution   : "best" (no height cap) or a max height ("2160".."360")
+//   videoMaxMbps : cap on video bitrate in Mbit/s, or falsy for no cap ("Max")
+// The height acts as a ceiling: a video whose max is below the pick still
+// downloads (at its max). But if NOTHING is at or below the pick — i.e. the
+// resolution genuinely isn't available — there is deliberately no catch-all
+// fallback, so yt-dlp errors and the caller reports it to the user. "Best"
+// keeps the catch-all fallbacks since it can never be "unavailable".
+function buildVideoFormat(resolution, videoMaxMbps) {
+  const maxH = resolution === 'best' ? null : parseInt(resolution, 10);
+  const h = maxH ? `[height<=${maxH}]` : '';
   const mbps = Number(videoMaxMbps);
   const clauses = [];
   if (mbps > 0) {
@@ -124,12 +135,14 @@ function buildVideoFormat(quality, videoMaxMbps) {
   }
   clauses.push(`bestvideo${h}+bestaudio`);
   clauses.push(`best${h}`);
-  clauses.push('bestvideo+bestaudio');
-  clauses.push('best'); // absolute last resort
+  if (!maxH) {
+    clauses.push('bestvideo+bestaudio');
+    clauses.push('best'); // absolute last resort
+  }
   return [...new Set(clauses)].join('/');
 }
 
-// ── yt-dlp process helpers ───────────────────────────────────────────────
+// ── yt-dlp process helpers ────────────────────────────────────────
 function ensureExecutable(filePath) {
   // Some serverless platforms (notably Vercel) can strip the executable bit
   // off bundled binaries when packaging a function. This is a harmless
@@ -198,7 +211,7 @@ async function searchYouTube(query, limit) {
   return data.entries || [];
 }
 
-// ── Keep-alive self-ping ────────────────────────────────────────────────
+// ── Keep-alive self-ping ────────────────────────────────────────
 // Render's free tier spins a web service down after ~15 min with no inbound
 // traffic (the next visitor then waits ~30-60s for a cold start). Pinging our
 // own public URL on a timer keeps it warm. Render sets RENDER_EXTERNAL_URL
@@ -221,7 +234,7 @@ function keepAlivePing() {
     .catch((e) => console.error(`[keep-alive] ${target} failed: ${e.message || e}`));
 }
 
-// ── API routes ───────────────────────────────────────────────────────────
+// ── API routes ───────────────────────────────────────────────
 
 // Ultra-light endpoint for the keep-alive ping (and any external uptime
 // monitor). `/api/health` is the richer diagnostic one.
@@ -257,7 +270,7 @@ app.get('/api/health', async (req, res) => {
  *   link: string,            // direct YouTube URL (optional if search terms given)
  *   query1: string,          // artist (music) or creator (video)
  *   query2: string,          // song (music) or title (video)
- *   quality: "best" | "1080p" (video only),
+ *   resolution: "best" | "2160" | "1440" | "1080" | "720" | "480" | "360"  (video only, default "1080"),
  *   audioKbps: 128|160|192|256|320   (music only, default 320),
  *   videoMaxMbps: number | null      (video only, cap in Mbit/s; null = no cap),
  *   downloadPlaylist: boolean
@@ -272,11 +285,13 @@ app.post('/api/download', async (req, res) => {
     link = '',
     query1 = '',
     query2 = '',
-    quality = '1080p',
+    resolution: resolutionRaw = '1080',
     audioKbps = 320,
     videoMaxMbps = null,
     downloadPlaylist = false,
   } = req.body || {};
+
+  const resolution = normalizeResolution(resolutionRaw);
 
   const trimmedLink = (link || '').trim();
 
@@ -341,7 +356,7 @@ app.post('/api/download', async (req, res) => {
       );
     } else {
       args.push(
-        '-f', buildVideoFormat(quality, videoMaxMbps),
+        '-f', buildVideoFormat(resolution, videoMaxMbps),
         '--merge-output-format', 'mp4'
       );
     }
@@ -381,7 +396,20 @@ app.post('/api/download', async (req, res) => {
         // client-specific and a truly gone video just fails again anyway.
       }
     }
-    if (!downloaded) throw lastErr;
+
+    if (!downloaded) {
+      const lastMsg = `${lastErr && (lastErr.stderr || lastErr.message) || ''}`;
+      // A specific resolution was picked and no client had a format at or
+      // below it — tell the user to choose a different one.
+      if (mode === 'video' && resolution !== 'best' && /requested format|format is not available/i.test(lastMsg)) {
+        const e = new Error(
+          `${resolution}p isn't available for this video. Pick "Best available" or a different resolution.`
+        );
+        e.userFacing = true;
+        throw e;
+      }
+      throw lastErr;
+    }
 
     const files = fs
       .readdirSync(workDir)
@@ -426,6 +454,13 @@ app.post('/api/download', async (req, res) => {
     fs.rm(workDir, { recursive: true, force: true }, () => {});
     const details = err.stderr || err.message || String(err);
     console.error('Download error:', details);
+
+    // A message we built ourselves for the user (e.g. resolution unavailable).
+    if (err.userFacing) {
+      if (!res.headersSent) res.status(409).json({ error: err.message });
+      else res.destroy(err);
+      return;
+    }
 
     let errorMsg = 'The video or music appears to be unavailable, private, or does not exist.';
     if (/sign in to confirm|not a bot/i.test(details)) {

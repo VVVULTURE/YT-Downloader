@@ -2,6 +2,7 @@
 import os
 import sys
 import json
+import re
 import threading
 import queue
 import time # Import time for better thread control/sleep simulation if needed
@@ -13,7 +14,7 @@ from tkinter import filedialog, messagebox
 import customtkinter as ctk
 
 
-# ── yt-dlp AUTO-UPDATER ──────────────────────────────────────────────────────
+# ── yt-dlp AUTO-UPDATER ───────────────────────────────────────────────────
 # YouTube changes its internals constantly. A yt-dlp build that is only a few
 # weeks old commonly starts failing EVERY download with:
 #     ERROR: unable to download video data: HTTP Error 403: Forbidden
@@ -165,7 +166,7 @@ _bootstrap_ytdlp()
 import yt_dlp  # noqa: E402  — must come after _bootstrap_ytdlp()
 
 
-# ── CONFIGURATION ────────────────────────────────-----------------------------
+# ── CONFIGURATION ─────────────────────────-----------------------------
 DEFAULT_MUSIC_DIR = os.path.join(os.path.expanduser("~"), "Music", "YT-Music")
 DEFAULT_VIDEO_DIR = os.path.join(os.path.expanduser("~"), "Videos", "YT-Videos")
 SETTINGS_FILE = os.path.join(os.getenv("USERPROFILE", os.path.expanduser("~")), ".ytdl_app_settings.json")
@@ -211,7 +212,7 @@ scoring_config = json.loads("""
 
 
 
-# ── SETTINGS HELPERS ──────────────────────────────────────────────── ---------
+# ── SETTINGS HELPERS ────────────────────────────────────── ---------
 def load_settings():
     if os.path.exists(SETTINGS_FILE):
         try:
@@ -232,7 +233,7 @@ def save_settings(s):
         pass
 
 
-# ── SCORING CORE ────────────────────────────────────────────────-------------
+# ── SCORING CORE ────────────────────────────────────-------------
 def _sim(a, b):
     return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
@@ -268,7 +269,50 @@ def score_video(entry, creator, title_q):
     return score
 
 
-# ── GUI COMPONENTS ────────────────────────────────-----------
+VIDEO_RESOLUTIONS = ["Best", "2160p", "1440p", "1080p", "720p", "480p", "360p"]
+
+
+def build_video_format(resolution, video_max_mbps):
+    """yt-dlp `format` string for a video download.
+
+    resolution acts as a ceiling ("1080p" => up to 1080p): a video whose max
+    is lower still downloads at its max. But when nothing is at or below the
+    pick — i.e. the resolution genuinely isn't available — there is
+    deliberately no catch-all clause, so yt-dlp errors and the caller can tell
+    the user to choose another. "Best" keeps the catch-alls.
+    """
+    res = str(resolution or "Best").strip().rstrip("pP")
+    max_h = None if res.lower() in ("", "best") else int(res)
+    h = f"[height<={max_h}]" if max_h else ""
+
+    clauses = []
+    if video_max_mbps:
+        cap = int(float(video_max_mbps) * 1000)  # yt-dlp vbr/tbr filters are KBit/s
+        clauses += [
+            f"bestvideo{h}[vbr<={cap}]+bestaudio",
+            f"bestvideo{h}[tbr<={cap}]+bestaudio",
+            f"best{h}[tbr<={cap}]",
+        ]
+    clauses += [f"bestvideo{h}+bestaudio", f"best{h}"]
+    if not max_h:
+        clauses += ["bestvideo+bestaudio", "best"]
+
+    seen = []
+    for c in clauses:
+        if c not in seen:
+            seen.append(c)
+    return "/".join(seen)
+
+
+_TERMINAL_DL_ERROR = re.compile(
+    r"this video is private|private video|members[- ]only|join this channel|"
+    r"has been removed by|account associated with this video has been terminated|"
+    r"video has been removed for violating",
+    re.I,
+)
+
+
+# ── GUI COMPONENTS ────────────────────────-----------
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -449,7 +493,7 @@ class App(ctk.CTk):
 
 
     def _perform_download(self, url, mode, download_playlist=False, label=None,
-                          audio_kbps=None, video_max_mbps=None):
+                          audio_kbps=None, video_max_mbps=None, resolution="Best"):
         """Performs the download for a given URL and mode.
 
         download_playlist: if False (default), only the single requested
@@ -463,6 +507,7 @@ class App(ctk.CTk):
         audio_kbps: target MP3 bitrate for music downloads (default 320).
         video_max_mbps: cap on video bitrate in Mbit/s for video downloads;
         None means no cap (best available), which is the default.
+        resolution: max height for video downloads ("Best" or "1080p" etc).
         """
         folder = self.music_folder_var.get() if mode == "music" else self.video_folder_var.get()
         os.makedirs(folder, exist_ok=True)
@@ -488,21 +533,8 @@ class App(ctk.CTk):
                     "noplaylist": not download_playlist,
                 }
             else: # Video mode
-                if video_max_mbps:
-                    # Cap video bitrate. `vbr`/`tbr` filters are in KBit/s.
-                    # Each clause falls back to the next so a video whose
-                    # formats don't report a bitrate still downloads.
-                    cap = int(float(video_max_mbps) * 1000)
-                    video_format = (
-                        f"bestvideo[vbr<={cap}]+bestaudio/"
-                        f"bestvideo[tbr<={cap}]+bestaudio/"
-                        f"best[tbr<={cap}]/"
-                        f"bestvideo+bestaudio/best"
-                    )
-                else:
-                    video_format = "bestvideo+bestaudio/best"
                 dl_opts = {
-                    "format": video_format,
+                    "format": build_video_format(resolution, video_max_mbps),
                     "merge_output_format": "mp4",
                     "outtmpl": os.path.join(folder, "%(title)s-%(id)s.%(ext)s"),
                     "quiet": True,
@@ -519,16 +551,22 @@ class App(ctk.CTk):
             dl_opts.setdefault("retries", 5)
             dl_opts.setdefault("fragment_retries", 10)
 
-            # YouTube periodically 403s whichever "player client" yt-dlp picks
-            # by default. If that happens, retry the same download forcing a
-            # different client before giving up. yt-dlp's own current default
-            # order is tried first (client=None).
-            client_fallbacks = [None, ["tv"], ["web_safari"], ["ios"], ["android"], ["mweb"]]
+            # YouTube periodically breaks whichever "player client" yt-dlp picks
+            # by default (403s, "page needs to be reloaded", bot checks). If that
+            # happens, retry the same download forcing a different client before
+            # giving up. The "tv" client is currently broken upstream, so it is
+            # never used; "default,-tv" asks for the normal set minus tv.
+            client_fallbacks = [
+                ["default", "-tv"],
+                ["default", "web_embedded"],
+                ["web_safari", "mweb"],
+                ["ios"],
+                ["android"],
+            ]
             last_err = None
             for client in client_fallbacks:
                 opts = dict(dl_opts)
-                if client:
-                    opts["extractor_args"] = {"youtube": {"player_client": client}}
+                opts["extractor_args"] = {"youtube": {"player_client": client}}
                 try:
                     with yt_dlp.YoutubeDL(opts) as ydl:
                         ydl.download([url])
@@ -536,18 +574,40 @@ class App(ctk.CTk):
                     return folder
                 except yt_dlp.DownloadError as e:
                     last_err = e
-                    msg = str(e).lower()
-                    # Only a forbidden / client-ish failure is worth retrying
-                    # with another client. A genuinely private/removed video
-                    # fails the same way on every client, so we still surface
-                    # it after the loop.
-                    if "403" in msg or "forbidden" in msg or "player" in msg or "sign in" in msg:
-                        continue
-                    raise
+                    msg = str(e)
+                    # A genuinely private/removed video fails the same way on
+                    # every client, so stop early and surface it.
+                    if _TERMINAL_DL_ERROR.search(msg):
+                        raise
+                    # A missing resolution also fails identically on every
+                    # client — no point rotating through all of them.
+                    if re.search(r"requested format|format is not available", msg, re.I):
+                        raise
+                    # Otherwise assume it is a client-specific hiccup and try
+                    # the next client.
+                    continue
             raise last_err
 
         except yt_dlp.DownloadError as e:
             error_text = str(e)
+            if (mode == "video" and str(resolution or "Best").lower() not in ("", "best")
+                    and re.search(r"requested format|format is not available", error_text, re.I)):
+                messagebox.showerror(
+                    "Resolution Unavailable",
+                    f"{resolution} isn't available for this video.\n\n"
+                    "Choose \"Best\" or a lower resolution and try again."
+                )
+                self._send_progress(label, f"ERROR: {resolution} not available for this video.", "#ef4444", 0)
+                return None
+            if re.search(r"page needs to be reloaded|sign in to confirm|not a bot", error_text, re.I):
+                messagebox.showerror(
+                    "Download Error",
+                    "YouTube blocked this download attempt (bot check or session error).\n\n"
+                    "Try again in a moment. If it keeps happening, the app may need a yt-dlp update.\n\n"
+                    f"Details:\n{error_text}"
+                )
+                self._send_progress(label, "ERROR: YouTube blocked the request.", "#ef4444", 0)
+                return None
             messagebox.showerror(
                 "Download Error",
                 "The video or music appears to be unavailable, private, or does not exist.\n\n"
@@ -650,9 +710,13 @@ class App(ctk.CTk):
         self.v_title.pack(fill='x', padx=20)
 
 
-        self.v_qual = ctk.CTkSegmentedButton(tab, values=["Best", "1080p"], corner_radius=6)
+        # Resolution acts as a ceiling: a video whose max is lower still
+        # downloads (at its own max). If the pick is genuinely unavailable,
+        # the download errors and the user is told to choose another.
+        ctk.CTkLabel(tab, text="Resolution (max):").pack(pady=(10, 0))
+        self.v_qual = ctk.CTkOptionMenu(tab, values=VIDEO_RESOLUTIONS)
         self.v_qual.set("1080p")
-        self.v_qual.pack(pady=(5, 2))
+        self.v_qual.pack(pady=(2, 2))
 
         # Video bitrate cap. "Max" (default) = the previous behaviour: take the
         # best available stream with no bitrate limit.
@@ -752,6 +816,7 @@ class App(ctk.CTk):
             return
 
         video_max_mbps = self.v_bitrate()
+        resolution = self.v_qual.get()
 
         def worker():
             try:
@@ -760,7 +825,7 @@ class App(ctk.CTk):
                     url = link
                     mode = "video"
                     self._send_progress(self.v_lbl, f"Attempting direct download from URL...", "#ffcc00", 0)
-                    return self._perform_download(url, mode, download_playlist=self.v_playlist_var.get(), label=self.v_lbl, video_max_mbps=video_max_mbps)
+                    return self._perform_download(url, mode, download_playlist=self.v_playlist_var.get(), label=self.v_lbl, video_max_mbps=video_max_mbps, resolution=resolution)
 
                 # 2. Search Fallback
                 if not creator and not title:
@@ -793,7 +858,7 @@ class App(ctk.CTk):
                 url = f"https://www.youtube.com/watch?v={best_entry['id']}"
 
                 # --- Download Phase ---
-                return self._perform_download(url, mode, download_playlist=self.v_playlist_var.get(), label=self.v_lbl, video_max_mbps=video_max_mbps)
+                return self._perform_download(url, mode, download_playlist=self.v_playlist_var.get(), label=self.v_lbl, video_max_mbps=video_max_mbps, resolution=resolution)
 
             except yt_dlp.DownloadError:
                  messagebox.showerror("Download Error", "The searched content appears to be unavailable or does not exist.")
