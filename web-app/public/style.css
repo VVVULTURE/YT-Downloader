@@ -119,26 +119,20 @@ input[type="text"]:focus {
   height: 16px;
 }
 
-.segmented {
-  display: flex;
+select {
+  background: #14151a;
   border: 1px solid var(--border);
   border-radius: 8px;
-  overflow: hidden;
+  padding: 10px 12px;
+  color: var(--text);
+  font-size: 14px;
   width: fit-content;
-}
-
-.seg-btn {
-  padding: 8px 18px;
-  background: #14151a;
-  border: none;
-  color: var(--muted);
   cursor: pointer;
-  font-size: 13px;
 }
 
-.seg-btn.active {
-  background: var(--accent);
-  color: #fff;
+select:focus {
+  outline: none;
+  border-color: var(--accent);
 }
 
 .slider-row {

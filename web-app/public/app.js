@@ -16,16 +16,8 @@
     });
   });
 
-  // ── Video quality segmented control ────────────────────────────────
-  const qualityWrap = document.getElementById('v-quality');
-  let selectedQuality = '1080p';
-  qualityWrap.querySelectorAll('.seg-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      qualityWrap.querySelectorAll('.seg-btn').forEach((b) => b.classList.remove('active'));
-      btn.classList.add('active');
-      selectedQuality = btn.dataset.value;
-    });
-  });
+  // ── Video resolution ──────────────────────────────────────────────
+  const resolutionSelect = document.getElementById('v-resolution');
 
   // ── Bitrate sliders (mirror the desktop app) ───────────────────────
   // Each slider is a plain 0..N range input; the value maps to an entry in
@@ -73,7 +65,7 @@
 
   // ── Shared download helper ─────────────────────────────────────
   async function startDownload({
-    mode, link, query1, query2, quality, audioKbps, videoMaxMbps,
+    mode, link, query1, query2, resolution, audioKbps, videoMaxMbps,
     downloadPlaylist, statusEl, buttonEl,
   }) {
     if (!link && !query1 && !query2) {
@@ -90,7 +82,7 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          mode, link, query1, query2, quality, audioKbps, videoMaxMbps, downloadPlaylist,
+          mode, link, query1, query2, resolution, audioKbps, videoMaxMbps, downloadPlaylist,
         }),
       });
 
@@ -118,7 +110,7 @@
       statusEl.textContent = 'Finished';
       statusEl.style.color = 'var(--green)';
     } catch (err) {
-      statusEl.textContent = 'ERROR: Content Not Found/Unavailable.';
+      statusEl.textContent = `ERROR: ${err.message.split('\n')[0].slice(0, 90)}`;
       statusEl.style.color = 'var(--red)';
       alert(`Download Error\n\n${err.message}`);
     } finally {
@@ -147,7 +139,7 @@
       link: document.getElementById('v-link').value.trim(),
       query1: document.getElementById('v-creator').value.trim(),
       query2: document.getElementById('v-title').value.trim(),
-      quality: selectedQuality,
+      resolution: resolutionSelect.value,
       videoMaxMbps: getVideoMaxMbps(),
       downloadPlaylist: document.getElementById('v-playlist').checked,
       statusEl: document.getElementById('v-status'),

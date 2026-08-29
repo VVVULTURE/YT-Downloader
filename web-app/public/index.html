@@ -57,11 +57,16 @@
       <label>Title</label>
       <input type="text" id="v-title" placeholder="Title" />
 
-      <label>Quality</label>
-      <div class="segmented" id="v-quality">
-        <button class="seg-btn" data-value="best">Best</button>
-        <button class="seg-btn active" data-value="1080p">1080p</button>
-      </div>
+      <label>Resolution</label>
+      <select id="v-resolution">
+        <option value="best">Best available</option>
+        <option value="2160">2160p (4K)</option>
+        <option value="1440">1440p</option>
+        <option value="1080" selected>1080p</option>
+        <option value="720">720p</option>
+        <option value="480">480p</option>
+        <option value="360">360p</option>
+      </select>
 
       <label>Max Video Bitrate</label>
       <div class="slider-row">
