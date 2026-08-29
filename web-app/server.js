@@ -117,11 +117,13 @@ function normalizeResolution(v) {
 // Build the yt-dlp -f string for a video download.
 //   resolution   : "best" (no height cap) or a max height ("2160".."360")
 //   videoMaxMbps : cap on video bitrate in Mbit/s, or falsy for no cap ("Max")
-// The height acts as a ceiling: a video whose max is below the pick still
-// downloads (at its max). But if NOTHING is at or below the pick — i.e. the
-// resolution genuinely isn't available — there is deliberately no catch-all
-// fallback, so yt-dlp errors and the caller reports it to the user. "Best"
-// keeps the catch-all fallbacks since it can never be "unavailable".
+// The height is a ceiling: `[height<=H]` still matches a video whose best is
+// below H, so it downloads at its max. Whether H is *genuinely* unavailable
+// (nothing at or below it) is decided up front from a format probe
+// (see probeVideoHeights) — not from a download failure — so it is safe for
+// this string to end in an un-capped `bestvideo+bestaudio/best` catch-all.
+// That catch-all only ever fires when the working client reports formats with
+// no usable height metadata, where grabbing *something* beats failing.
 function buildVideoFormat(resolution, videoMaxMbps) {
   const maxH = resolution === 'best' ? null : parseInt(resolution, 10);
   const h = maxH ? `[height<=${maxH}]` : '';
@@ -135,11 +137,80 @@ function buildVideoFormat(resolution, videoMaxMbps) {
   }
   clauses.push(`bestvideo${h}+bestaudio`);
   clauses.push(`best${h}`);
-  if (!maxH) {
-    clauses.push('bestvideo+bestaudio');
-    clauses.push('best'); // absolute last resort
-  }
+  clauses.push('bestvideo+bestaudio');
+  clauses.push('best'); // absolute last resort
   return [...new Set(clauses)].join('/');
+}
+
+// YouTube keeps breaking one "player client" or another for hosted IPs
+// (403 Forbidden; "The page needs to be reloaded" from tv_downgraded when
+// cookies are set; SABR / PO-token issues; datacenter-IP throttling; ...).
+// Try these client sets in order and use the first that works. `default,-tv`
+// is the current workaround for the "page needs to be reloaded" error.
+const YT_CLIENT_ATTEMPTS = [
+  'default',            // best quality when it works
+  'default,-tv',        // tv_downgraded is currently broken with cookies
+  'default,web_embedded',
+  'web_safari,mweb',
+  'ios',
+  'android',
+];
+
+// Errors no client can get past — bail out of the rotation immediately.
+const YT_TERMINAL_ERROR =
+  /this video is private|private video|members[- ]only|join this channel|has been removed by|account associated with this video has been terminated|video has been removed for violating|video unavailable|who has blocked it|not available in your country|inappropriate for some users/i;
+
+// Probe a video URL for the set of video heights YouTube will actually serve
+// from this host, and which client set produced them. Rotates the same
+// clients as the download. Uses --ignore-no-formats-error so a client that
+// returns only audio/storyboard formats yields an (empty) list instead of
+// throwing "Requested format is not available" — which must NOT be confused
+// with the resolution the user picked being unavailable.
+// Returns { clients, heights: number[] (ascending), maxH } or null if no
+// client could enumerate any video format.
+async function probeVideoHeights(url) {
+  let best = null;
+  for (const clients of YT_CLIENT_ATTEMPTS) {
+    let info;
+    try {
+      const { stdout } = await runYtDlp([
+        '--dump-single-json',
+        '--no-warnings',
+        '--no-playlist',
+        '--skip-download',
+        '--ignore-no-formats-error',
+        '--extractor-args', `youtube:player_client=${clients}`,
+        ...COOKIE_ARGS,
+        url,
+      ]);
+      const jsonStart = stdout.indexOf('{');
+      if (jsonStart < 0) continue;
+      // --dump-single-json emits exactly one JSON object; trim any trailing
+      // newline. slice-from-first-brace guards against a stray leading line.
+      info = JSON.parse(stdout.slice(jsonStart).trim());
+    } catch (e) {
+      if (e instanceof SyntaxError) continue; // unparseable probe output — try next client
+      if (YT_TERMINAL_ERROR.test(`${e.stderr || e.message || ''}`)) throw e;
+      continue;
+    }
+    const heights = [
+      ...new Set(
+        (info.formats || [])
+          .filter((f) => f.vcodec && f.vcodec !== 'none' && f.height)
+          .map((f) => f.height)
+      ),
+    ].sort((a, b) => a - b);
+    if (!heights.length) continue;
+    const maxH = heights[heights.length - 1];
+    if (!best || maxH > best.maxH) best = { clients, heights, maxH };
+    // `default`-family clients report YouTube's full quality ladder, so the
+    // first one that answers is authoritative — stop. Other clients
+    // (ios/android/web_safari) often expose only a subset, so keep probing
+    // for something better, but don't bother once we already have >=1080p.
+    if (clients.startsWith('default')) break;
+    if (best.maxH >= 1080) break;
+  }
+  return best;
 }
 
 // ── yt-dlp process helpers ────────────────────────────────────────
@@ -211,7 +282,7 @@ async function searchYouTube(query, limit) {
   return data.entries || [];
 }
 
-// ── Keep-alive self-ping ────────────────────────────────────────
+// ── Keep-alive self-ping ───────────────────────────────────────
 // Render's free tier spins a web service down after ~15 min with no inbound
 // traffic (the next visitor then waits ~30-60s for a cold start). Pinging our
 // own public URL on a timer keeps it warm. Render sets RENDER_EXTERNAL_URL
@@ -278,6 +349,11 @@ app.get('/api/health', async (req, res) => {
  *
  * Streams back either a single media file, or (when a playlist is
  * downloaded) a .zip of all files in the playlist.
+ *
+ * Status codes: 200 with the file; 400 bad input; 404 nothing found via
+ * search; 409 {error} the picked resolution is genuinely unavailable for
+ * that video (message names the lowest it offers); 500 {error, details}
+ * everything else (bot check, YouTube-side extraction block, ...).
  */
 app.post('/api/download', async (req, res) => {
   const {
@@ -363,52 +439,84 @@ app.post('/api/download', async (req, res) => {
 
     args.push(url);
 
-    // YouTube keeps breaking one "player client" or another for hosted IPs
-    // (403 Forbidden; "The page needs to be reloaded" from tv_downgraded when
-    // cookies are set; SABR / PO-token issues; ...). Try a sequence of client
-    // sets and use the first that works. `default,-tv` is the current
-    // recommended workaround for the "page needs to be reloaded" error.
-    // A genuinely private/removed video fails on every one and the last
+    // For video: probe first so we (a) know which client set actually works
+    // from this host, and (b) can tell — from real format data, not a
+    // download failure — whether the picked resolution is genuinely
+    // unavailable. Probing a single video is representative enough for a
+    // playlist too, so we probe even in playlist mode (just don't hard-fail
+    // a playlist on one entry missing the resolution).
+    let probe = null;
+    if (mode === 'video' && resolution !== 'best') {
+      probe = await probeVideoHeights(url);
+
+      if (probe && !downloadPlaylist) {
+        const maxH = parseInt(resolution, 10);
+        const atOrBelow = probe.heights.filter((x) => x <= maxH);
+        if (!atOrBelow.length) {
+          const lowest = probe.heights[0];
+          const e = new Error(
+            `${resolution}p isn't available for this video — the lowest it offers is ${lowest}p. ` +
+              `Pick "Best available", or ${lowest}p or higher.`
+          );
+          e.userFacing = true;
+          throw e;
+        }
+      }
+    }
+
+    // Try client sets in order; if the probe found a working one, lead with
+    // it. A genuinely private/removed video fails on every client and its
     // error is surfaced below.
-    const clientAttempts = [
-      'default',            // best quality when it works
-      'default,-tv',        // tv_downgraded is currently broken with cookies
-      'default,web_embedded',
-      'web_safari,mweb',
-      'ios',
-      'android',
-    ];
-    // Errors no client can get past — bail out immediately instead of
-    // retrying all six.
-    const TERMINAL = /this video is private|private video|members[- ]only|join this channel|has been removed by|account associated with this video has been terminated|video has been removed for violating/i;
+    const downloadClients = probe
+      ? [probe.clients, ...YT_CLIENT_ATTEMPTS.filter((c) => c !== probe.clients)]
+      : YT_CLIENT_ATTEMPTS;
 
     let lastErr = null;
     let downloaded = false;
-    for (const clients of clientAttempts) {
+    for (const clients of downloadClients) {
       try {
         await runYtDlp(['--extractor-args', `youtube:player_client=${clients}`, ...args]);
         downloaded = true;
         break;
       } catch (e) {
         lastErr = e;
-        if (TERMINAL.test(`${e.stderr || e.message || ''}`)) break;
-        // Otherwise retry with the next client set — the errors above are all
-        // client-specific and a truly gone video just fails again anyway.
+        if (YT_TERMINAL_ERROR.test(`${e.stderr || e.message || ''}`)) break;
+        // Otherwise retry with the next client set — 403 / "reload" / missing
+        // formats are all client-specific; a truly gone video fails anyway.
       }
     }
 
     if (!downloaded) {
-      const lastMsg = `${lastErr && (lastErr.stderr || lastErr.message) || ''}`;
-      // A specific resolution was picked and no client had a format at or
-      // below it — tell the user to choose a different one.
-      if (mode === 'video' && resolution !== 'best' && /requested format|format is not available/i.test(lastMsg)) {
+      const lastMsg = `${(lastErr && (lastErr.stderr || lastErr.message)) || ''}`;
+      // The probe proved a usable format existed, but every client failed to
+      // actually pull it — that's YouTube blocking downloads from this host
+      // right now, not a bad resolution pick.
+      if (
+        mode === 'video' &&
+        probe &&
+        /requested format|format is not available/i.test(lastMsg)
+      ) {
+        const e = new Error(
+          'YouTube let this server list the video but blocked every attempt to download it ' +
+            '(a known, recurring YouTube-side issue for hosted IPs). Try again in a minute or two.'
+        );
+        e.userFacing = true;
+        throw e;
+      }
+      // No probe data and a format error — best guess is the resolution pick.
+      if (
+        mode === 'video' &&
+        resolution !== 'best' &&
+        !downloadPlaylist &&
+        /requested format|format is not available/i.test(lastMsg)
+      ) {
         const e = new Error(
           `${resolution}p isn't available for this video. Pick "Best available" or a different resolution.`
         );
         e.userFacing = true;
         throw e;
       }
-      throw lastErr;
+      throw lastErr || new Error('The download failed for an unknown reason. Try again.');
     }
 
     const files = fs
@@ -463,14 +571,21 @@ app.post('/api/download', async (req, res) => {
     }
 
     let errorMsg = 'The video or music appears to be unavailable, private, or does not exist.';
-    if (/sign in to confirm|not a bot/i.test(details)) {
+    if (/sign in to confirm|not a bot|confirm you.?re not a bot/i.test(details)) {
       errorMsg = COOKIES_FILE
         ? 'YouTube rejected the request even with cookies — the cookies file may be expired. Re-export it (see the web-app README).'
         : "YouTube is asking this server to \"confirm you're not a bot\" (normal for a hosted IP). Add a cookies.txt file — see the web-app README, \"YouTube bot check\".";
-    } else if (/page needs to be reloaded|only images are available|sabr/i.test(details)) {
+    } else if (
+      /page needs to be reloaded|only images are available|sabr|requested format|format is not available|nsig extraction failed|unable to extract|failed to extract any player response|player response/i.test(
+        details
+      )
+    ) {
       errorMsg =
-        'YouTube is temporarily blocking every extraction method for this video from this server ' +
-        '(a known, recurring YouTube-side issue). Try again in a bit, or update yt-dlp.';
+        'YouTube is temporarily blocking video extraction for this server ' +
+        '(a known, recurring YouTube-side issue for hosted IPs). Try again in a minute or two' +
+        (COOKIES_FILE ? '.' : ', or add a cookies.txt file (see the web-app README).');
+    } else if (/is not a valid URL|unsupported url/i.test(details)) {
+      errorMsg = 'That doesn\'t look like a YouTube link. Paste a full video URL, or use the search fields.';
     }
 
     if (!res.headersSent) {
