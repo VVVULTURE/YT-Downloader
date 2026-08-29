@@ -4,15 +4,38 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const zlib = require('zlib');
 const { execFile } = require('child_process');
-// archiver is pinned to the v7 line: v8 went ESM-only and dropped this
-// factory-function API, which would need Node 20.19+ for require(ESM).
-const archiver = require('archiver');
 const ffmpegPath = require('ffmpeg-static');
 
 const app = express();
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+
+// ── Cross-origin isolation ───────────────────────────────────────
+// The browser does the MP3 transcode with multi-threaded ffmpeg.wasm, which
+// needs SharedArrayBuffer, which needs the page to be "crossOriginIsolated".
+// These three headers grant that. Safe here: the app loads ZERO cross-origin
+// resources (ffmpeg.wasm + JSZip are served from public/vendor/, same origin).
+// If a browser ends up not isolated anyway, app.js falls back to asking the
+// server to transcode (?transcodeClient=false).
+app.use((req, res, next) => {
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  next();
+});
+
+app.use(
+  express.static(path.join(__dirname, 'public'), {
+    setHeaders(res, filePath) {
+      if (filePath.endsWith('.wasm')) res.setHeader('Content-Type', 'application/wasm');
+      // The ~33 MB ffmpeg-core.wasm should download exactly once per visitor.
+      if (filePath.includes(`${path.sep}vendor${path.sep}`)) {
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      }
+    },
+  })
+);
 
 const PORT = process.env.PORT || 3000;
 
@@ -232,7 +255,7 @@ async function probeVideoHeights(url) {
   return best;
 }
 
-// ── yt-dlp process helpers ───────────────────────────────────
+// ── yt-dlp process helpers ──────────────────────────────
 function ensureExecutable(filePath) {
   // Some serverless platforms (notably Vercel) can strip the executable bit
   // off bundled binaries when packaging a function. This is a harmless
@@ -301,7 +324,141 @@ async function searchYouTube(query, limit) {
   return data.entries || [];
 }
 
-// ── Keep-alive self-ping ────────────────────────────────────
+// ── Response helpers ─────────────────────────────────────────
+// yt-dlp writes files as "<title>-<id>.<ext>". Recover a display name.
+function stripYtId(basename) {
+  return basename
+    .replace(/\.[^.]+$/, '')
+    .replace(/-[A-Za-z0-9_-]{11}$/, '')
+    .trim();
+}
+
+// HTTP header values are Latin-1 and can't hold control chars; also make it a
+// safe filename stem.
+function headerSafe(s) {
+  return (
+    String(s || '')
+      .normalize('NFKD')
+      .replace(/[^\x20-\x7E]/g, '')
+      .replace(/["\\/:*?<>|]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 120) || 'youtube'
+  );
+}
+
+// Stream several files back in ONE response for the browser to assemble
+// (JSZip, and ffmpeg.wasm for audio). Framing, repeated per file:
+//   uint16BE nameLen | name (utf8) | uint64BE dataLen | data
+// The caller sets X-Ytdl-Kind / -Name / -Bitrate and calls res.end() after.
+function writeMultiStream(res, files) {
+  return new Promise((resolve, reject) => {
+    let i = 0;
+    const next = () => {
+      if (i >= files.length) return resolve();
+      const { name, path: p } = files[i++];
+      const nameBuf = Buffer.from(name, 'utf8');
+      const head = Buffer.alloc(2 + nameBuf.length + 8);
+      head.writeUInt16BE(nameBuf.length, 0);
+      nameBuf.copy(head, 2);
+      head.writeBigUInt64BE(BigInt(fs.statSync(p).size), 2 + nameBuf.length);
+      res.write(head);
+      const rs = fs.createReadStream(p);
+      rs.once('error', reject);
+      rs.once('end', next);
+      rs.pipe(res, { end: false });
+    };
+    next();
+  });
+}
+
+const _crc32 = (() => {
+  if (typeof zlib.crc32 === 'function') return (buf) => zlib.crc32(buf) >>> 0;
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c >>> 0;
+  }
+  return (buf) => {
+    let c = 0xffffffff;
+    for (let i = 0; i < buf.length; i++) c = table[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+})();
+
+// Minimal stored (method 0 — no compression) ZIP writer. Only used on the
+// fallback path where the browser can't assemble the .zip itself; media is
+// already compressed so "store" costs ~nothing.
+function streamStoreZip(res, files, zipName) {
+  return new Promise((resolve, reject) => {
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`);
+    const central = [];
+    let offset = 0;
+    const writeAll = (buf) =>
+      new Promise((r) => (res.write(buf) ? r() : res.once('drain', r)));
+
+    (async () => {
+      for (const { name, path: p } of files) {
+        const data = fs.readFileSync(p);
+        const nameBuf = Buffer.from(name, 'utf8');
+        const crc = _crc32(data);
+        const lfh = Buffer.alloc(30 + nameBuf.length);
+        lfh.writeUInt32LE(0x04034b50, 0);
+        lfh.writeUInt16LE(20, 4);
+        lfh.writeUInt16LE(0, 6);
+        lfh.writeUInt16LE(0, 8); // store
+        lfh.writeUInt16LE(0, 10);
+        lfh.writeUInt16LE(0x21, 12); // 1980-01-01
+        lfh.writeUInt32LE(crc, 14);
+        lfh.writeUInt32LE(data.length, 18);
+        lfh.writeUInt32LE(data.length, 22);
+        lfh.writeUInt16LE(nameBuf.length, 26);
+        lfh.writeUInt16LE(0, 28);
+        nameBuf.copy(lfh, 30);
+        central.push({ name: nameBuf, crc, size: data.length, offset });
+        await writeAll(lfh);
+        offset += lfh.length;
+        await writeAll(data);
+        offset += data.length;
+      }
+      const cdStart = offset;
+      for (const c of central) {
+        const cdh = Buffer.alloc(46 + c.name.length);
+        cdh.writeUInt32LE(0x02014b50, 0);
+        cdh.writeUInt16LE(20, 4);
+        cdh.writeUInt16LE(20, 6);
+        cdh.writeUInt16LE(0, 8);
+        cdh.writeUInt16LE(0, 10);
+        cdh.writeUInt16LE(0, 12);
+        cdh.writeUInt16LE(0x21, 14);
+        cdh.writeUInt32LE(c.crc, 16);
+        cdh.writeUInt32LE(c.size, 20);
+        cdh.writeUInt32LE(c.size, 24);
+        cdh.writeUInt16LE(c.name.length, 28);
+        cdh.writeUInt32LE(0, 30); // extra + comment len
+        cdh.writeUInt16LE(0, 34); // disk
+        cdh.writeUInt16LE(0, 36); // internal attrs
+        cdh.writeUInt32LE(0, 38); // external attrs
+        cdh.writeUInt32LE(c.offset, 42);
+        c.name.copy(cdh, 46);
+        await writeAll(cdh);
+        offset += cdh.length;
+      }
+      const eocd = Buffer.alloc(22);
+      eocd.writeUInt32LE(0x06054b50, 0);
+      eocd.writeUInt16LE(central.length, 8);
+      eocd.writeUInt16LE(central.length, 10);
+      eocd.writeUInt32LE(offset - cdStart, 12);
+      eocd.writeUInt32LE(cdStart, 16);
+      res.end(eocd);
+      resolve();
+    })().catch(reject);
+  });
+}
+
+// ── Keep-alive self-ping ──────────────────────────
 // Render's free tier spins a web service down after ~15 min with no inbound
 // traffic (the next visitor then waits ~30-60s for a cold start). Pinging our
 // own public URL on a timer keeps it warm. Render sets RENDER_EXTERNAL_URL
@@ -365,6 +522,8 @@ app.get('/api/health', async (req, res) => {
     ytdlpPresent: ytdlpExists,
     ytdlpVersion,
     jsRuntime: process.execPath,
+    crossOriginIsolationHeaders: true,
+    ffmpegWasmStaged: fs.existsSync(path.join(__dirname, 'public/vendor/ffmpeg/ffmpeg-core.wasm')),
     ffmpegPath,
     ffmpegPresent: fs.existsSync(ffmpegPath),
     cookiesFile: COOKIES_FILE,
@@ -386,10 +545,18 @@ app.get('/api/health', async (req, res) => {
  *   downloadPlaylist: boolean
  * }
  *
- * Streams back either a single media file, or (when a playlist is
- * downloaded) a .zip of all files in the playlist.
+ * Extra flags (new client sends both true; absent = legacy all-server behaviour):
+ *   assembleClient  - browser will assemble multi-file (playlist) responses (JSZip)
+ *   transcodeClient - browser will transcode audio -> MP3 (ffmpeg.wasm)
  *
- * Status codes: 200 with the file; 400 bad input; 404 nothing found via
+ * Response carries an `X-Ytdl-Kind` header telling app.js what to do with the body:
+ *   media        - final file, save as-is (Content-Disposition names it)
+ *   audio        - one raw audio track; browser transcodes to MP3 @ X-Ytdl-Bitrate,
+ *                  saves as `${X-Ytdl-Name}.mp3`
+ *   media-multi  - length-prefixed multi-file stream; browser zips as-is
+ *   audio-multi  - length-prefixed multi-file stream; browser transcodes each, then zips
+ *
+ * Status codes: 200 with the body; 400 bad input; 404 nothing found via
  * search; 409 {error} the picked resolution is genuinely unavailable for
  * that video (message names the lowest it offers); 500 {error, details}
  * everything else (bot check, YouTube-side extraction block, ...).
@@ -404,6 +571,8 @@ app.post('/api/download', async (req, res) => {
     audioKbps = 320,
     videoMaxMbps = null,
     downloadPlaylist = false,
+    assembleClient = false,
+    transcodeClient = false,
   } = req.body || {};
 
   const resolution = normalizeResolution(resolutionRaw);
@@ -462,7 +631,11 @@ app.post('/api/download', async (req, res) => {
       args.push('--no-playlist');
     }
 
-    if (mode === 'music') {
+    if (mode === 'music' && transcodeClient) {
+      // Browser will transcode to MP3 — just fetch the raw audio track.
+      // Prefer m4a (AAC) so ffmpeg.wasm has the smallest decode job.
+      args.push('-f', 'bestaudio[ext=m4a]/bestaudio/best');
+    } else if (mode === 'music') {
       args.push(
         '-f', 'bestaudio/best',
         '--extract-audio',
@@ -562,45 +735,89 @@ app.post('/api/download', async (req, res) => {
       throw lastErr || new Error('The download failed for an unknown reason. Try again.');
     }
 
-    const files = fs
+    const named = fs
       .readdirSync(workDir)
       .map((f) => path.join(workDir, f))
-      .filter((f) => fs.statSync(f).isFile());
+      .filter((f) => fs.statSync(f).isFile())
+      .sort()
+      .map((p) => ({ path: p, name: path.basename(p) }));
 
-    if (!files.length) {
+    if (!named.length) {
       res.status(500).json({ error: 'Download finished but no output file was found.' });
       return;
     }
 
     const cleanup = () => fs.rm(workDir, { recursive: true, force: true }, () => {});
+    const stem = headerSafe(stripYtId(named[0].name));
 
-    if (files.length === 1) {
-      const filePath = files[0];
-      res.download(filePath, path.basename(filePath), (err) => {
+    // ── MUSIC + browser transcode: hand over the raw audio track(s) ──
+    if (mode === 'music' && transcodeClient) {
+      res.setHeader('X-Ytdl-Bitrate', String(clampAudioKbps(audioKbps)));
+      if (named.length === 1) {
+        res.setHeader('X-Ytdl-Kind', 'audio');
+        res.setHeader('X-Ytdl-Name', stem);
+        res.setHeader('Content-Type', 'application/octet-stream');
+        // Filename stays ASCII-safe — Node's setHeader rejects non-Latin1, and
+        // the browser names the final .mp3 from X-Ytdl-Name anyway.
+        res.setHeader('Content-Disposition', `attachment; filename="${headerSafe(named[0].name)}"`);
+        const rs = fs.createReadStream(named[0].path);
+        rs.once('error', () => res.destroy());
+        rs.once('close', cleanup);
+        rs.pipe(res);
+      } else {
+        res.setHeader('X-Ytdl-Kind', 'audio-multi');
+        res.setHeader('X-Ytdl-Name', `${stem} playlist`);
+        res.setHeader('X-Ytdl-Count', String(named.length));
+        res.setHeader('Content-Type', 'application/x-ytdl-multi');
+        try {
+          await writeMultiStream(res, named);
+          res.end();
+        } catch (e) {
+          res.destroy(e);
+        }
+        cleanup();
+      }
+      return;
+    }
+
+    // ── everything else: the server produced the final file(s) ──
+    if (named.length === 1) {
+      res.setHeader('X-Ytdl-Kind', 'media');
+      res.download(named[0].path, named[0].name, (err) => {
         cleanup();
         if (err) console.error('Error sending file:', err);
       });
-    } else {
-      const zipName = `${mode === 'music' ? 'music' : 'video'}-playlist-${Date.now()}.zip`;
-      const archive = archiver('zip', { zlib: { level: 9 } });
-
-      archive.on('error', (err) => {
-        console.error('Archive error:', err);
-        cleanup();
-        if (!res.headersSent) {
-          res.status(500).json({ error: 'Failed to build the playlist zip.', details: String(err) });
-        } else {
-          res.destroy(err);
-        }
-      });
-      archive.on('end', cleanup);
-
-      res.setHeader('Content-Type', 'application/zip');
-      res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`);
-      archive.pipe(res);
-      for (const f of files) archive.file(f, { name: path.basename(f) });
-      archive.finalize();
+      return;
     }
+
+    if (assembleClient) {
+      res.setHeader('X-Ytdl-Kind', 'media-multi');
+      res.setHeader('X-Ytdl-Name', `${stem} playlist`);
+      res.setHeader('X-Ytdl-Count', String(named.length));
+      res.setHeader('Content-Type', 'application/x-ytdl-multi');
+      try {
+        await writeMultiStream(res, named);
+        res.end();
+      } catch (e) {
+        res.destroy(e);
+      }
+      cleanup();
+      return;
+    }
+
+    // Fallback (legacy client / no JS): server assembles the .zip.
+    res.setHeader('X-Ytdl-Kind', 'media');
+    try {
+      await streamStoreZip(res, named, `${stem}-playlist.zip`);
+    } catch (e) {
+      console.error('Zip error:', e);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Failed to build the playlist zip.', details: String(e) });
+      } else {
+        res.destroy(e);
+      }
+    }
+    cleanup();
   } catch (err) {
     fs.rm(workDir, { recursive: true, force: true }, () => {});
     const details = err.stderr || err.message || String(err);
